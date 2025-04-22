@@ -36,6 +36,11 @@ Für konvexe Optimierungsprobleme besitzt ADMM unter milden Bedingungen eine glo
 
 ---
 
+
+## mögliche Ansätze
+
+
+
 ## Quellen
 - [ADMM Convergence for Nonconvex Problems (ar5iv.org)](https://ar5iv.labs.arxiv.org/html/2111.07016)
 - Weitere Quellen im Text verlinkt.
