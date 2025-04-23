@@ -37,7 +37,9 @@ Für konvexe Optimierungsprobleme besitzt ADMM unter milden Bedingungen eine glo
 ---
 
 
-## mögliche Ansätze
+## nächste Schritte
+- bessere Methode, um die Startpunkte zu initialisieren
+- Iteratives Verfahren aktivieren, nicht nur einfache Optimierung
 
 
 
