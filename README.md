@@ -1,6 +1,6 @@
 # Masterarbeit
 
-## Konvergenzverhalten
+## Konvergenzverhalten (Garantie und nicht konvexe Mengen)
 
 Für konvexe Optimierungsprobleme besitzt ADMM unter milden Bedingungen eine globale Konvergenzgarantie – d.h. es konvergiert zum Optimalpunkt. Im vorliegenden (nichtkonvexen) Anwendungsfall gibt es diese Garantie theoretisch nicht unbedingt. Dennoch zeigen neuere Untersuchungen, dass ADMM auch in vielen nichtkonvexen Trajektorienplanungsproblemen konvergiert. Insbesondere wenn die Aufteilung so gestaltet ist, dass linear-affine (oder bikonvexe) Teilprobleme entstehen, kann man Konvergenzresultate ableiten.  
 [Quelle](https://ar5iv.labs.arxiv.org/html/2111.07016)
@@ -40,6 +40,34 @@ Für konvexe Optimierungsprobleme besitzt ADMM unter milden Bedingungen eine glo
 ## nächste Schritte
 - bessere Methode, um die Startpunkte zu initialisieren
 - Iteratives Verfahren aktivieren, nicht nur einfache Optimierung
+
+
+## Problem mit reinen Ansätzen
+
+| Ansatz            | Schwäche |
+|-------------------|----------|
+| **Nur Wu (Seed-basiert)** | Seed-Update ist oft heuristisch, Optimierung nicht modular, schwer zu parallelisieren |
+| **Nur Ni (ADMM)**         | Keine Kontrolle über Raumstruktur, angewiesen auf gute initiale Korridore oder Separating Planes |
+
+---
+
+## Was macht ein Hybridansatz?
+
+### Ablauf (vereinfacht):
+
+1. **Initialer Pfad** (z. B. RRT*)
+   - Generiert erste Seedpunkte
+2. **Initiale SFC-Erstellung** um diese Seeds  
+   *(z. B. Ellipsoide, IRIS, CIRI)*
+3. **ADMM-Loop startet**:
+   - **Subproblem A**: Optimierung der Trajektorie *(wie in Ni et al.)*
+   - **Subproblem B**: Seedpunkt-Anpassung + neue Korridore *(wie in Wu et al.)*
+   - **Synchronisation** über *Slack-Variablen*:
+     - Positionen  
+     - Volumen  
+     - Dynamikgrenzen
+4. **Wiederhole**, bis Konvergenz erreicht ist
+
 
 
 

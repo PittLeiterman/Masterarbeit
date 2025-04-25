@@ -53,8 +53,6 @@ path_simplified = simplify_path(path)
 # Für pydecomp
 path_real = np.array([(y, x) for (x, y) in path_simplified])
 
-plt.imshow(grid, cmap="gray_r", origin="lower", extent=[0, area_size[0], 0, area_size[1]], alpha=0.3)
-
 
 # Konvexe Zerlegung
 A_list, b_list = pdc.convex_decomposition_2D(forest, path_real, np.array([area_size]))
