@@ -85,37 +85,50 @@ def build_position_constraints(path_real):
 
     return A_eq, b_eq, b_eq  # l == u == b
 
-def evaluate_polynomial_trajectory(x_opt, path_real, num_points_per_segment=50):
-    """
-    Gibt x,y-Werte der geplanten Trajektorie zurück, die aus den optimierten Koeffizienten evaluiert wurde.
-    
-    x_opt: Ergebnis aus QP-Solver (Koeffizientenvektor)
-    path_real: Original-Wegpunkte (zur Segmentanzahl)
-    Rückgabe: X, Y als 1D-Arrays
-    """
+def evaluate_polynomial_trajectory_path(x_opt, path_real, poly_order=5, num_points_per_segment=50):
     n_segments = len(path_real) - 1
-    n_coeff = 6
-    dim = 2  # x, y
-
-    traj_x = []
-    traj_y = []
+    n_coeff = poly_order + 1
+    traj_x, traj_y = [], []
 
     for i in range(n_segments):
-        # Indizes im großen Koeff-Vektor
-        idx_x = (i * dim + 0) * n_coeff
-        idx_y = (i * dim + 1) * n_coeff
+        idx_x = (i * 2) * n_coeff
+        idx_y = (i * 2 + 1) * n_coeff
+
         coeffs_x = x_opt[idx_x:idx_x + n_coeff].flatten()
         coeffs_y = x_opt[idx_y:idx_y + n_coeff].flatten()
 
-        t_vals = np.linspace(0, 1, num_points_per_segment)
-        for t in t_vals:
-            powers = np.array([t**i for i in range(n_coeff)])
-            x = np.dot(coeffs_x, powers)
-            y = np.dot(coeffs_y, powers)
-            traj_x.append(x)
-            traj_y.append(y)
+        ts = np.linspace(0, 1, num_points_per_segment, endpoint=True)
+        for t in ts:
+            powers = np.array([t**j for j in range(n_coeff)])
+            traj_x.append(np.dot(coeffs_x, powers))
+            traj_y.append(np.dot(coeffs_y, powers))
 
     return np.array(traj_x), np.array(traj_y)
+
+
+def evaluate_polynomial_trajectory_time(x_opt, segment_times, poly_order=7, num_points_per_segment=50):
+    n_segments = len(segment_times)
+    n_coeff = poly_order + 1
+    traj_x, traj_y = [], []
+
+    for i in range(n_segments):
+        T = segment_times[i]
+        idx_x = (i * 2) * n_coeff
+        idx_y = (i * 2 + 1) * n_coeff
+
+        coeffs_x = x_opt[idx_x:idx_x + n_coeff].flatten()
+        coeffs_y = x_opt[idx_y:idx_y + n_coeff].flatten()
+
+        ts = np.linspace(0, T, num_points_per_segment, endpoint=True)
+        for t in ts:
+            powers = np.array([t**j for j in range(n_coeff)])
+            traj_x.append(np.dot(coeffs_x, powers))
+            traj_y.append(np.dot(coeffs_y, powers))
+
+    return np.array(traj_x), np.array(traj_y)
+
+
+
 
 def build_continuity_constraints(path_real, order=3):
     """
