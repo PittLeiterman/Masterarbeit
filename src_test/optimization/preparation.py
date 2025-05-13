@@ -85,47 +85,36 @@ def build_position_constraints(path_real):
 
     return A_eq, b_eq, b_eq  # l == u == b
 
-def evaluate_polynomial_trajectory_path(x_opt, path_real, poly_order=5, num_points_per_segment=50):
-    n_segments = len(path_real) - 1
+def evaluate_polynomial_trajectory_time(x_opt, num_points=300, poly_order=5):
+    """
+    Evaluates the entire multi-segment trajectory over a fixed global time axis [0, N_segments].
+    Returns (x_vals, y_vals) each with shape (num_points,)
+    """
     n_coeff = poly_order + 1
+    n_segments = len(x_opt) // (2 * n_coeff)
+    total_time = n_segments  # 1 sec per segment → global t ∈ [0, n_segments]
+
+    ts = np.linspace(0, total_time, num_points)
     traj_x, traj_y = [], []
 
-    for i in range(n_segments):
-        idx_x = (i * 2) * n_coeff
-        idx_y = (i * 2 + 1) * n_coeff
+    for t in ts:
+        seg_idx = min(int(t), n_segments - 1)  # Sicherstellen, dass Index nicht überläuft
+        local_t = t - seg_idx  # Lokale Zeit in Segment ∈ [0, 1]
+
+        idx_x = (seg_idx * 2) * n_coeff
+        idx_y = (seg_idx * 2 + 1) * n_coeff
 
         coeffs_x = x_opt[idx_x:idx_x + n_coeff].flatten()
         coeffs_y = x_opt[idx_y:idx_y + n_coeff].flatten()
 
-        ts = np.linspace(0, 1, num_points_per_segment, endpoint=True)
-        for t in ts:
-            powers = np.array([t**j for j in range(n_coeff)])
-            traj_x.append(np.dot(coeffs_x, powers))
-            traj_y.append(np.dot(coeffs_y, powers))
+        powers = np.array([local_t**j for j in range(n_coeff)])
+        traj_x.append(np.dot(coeffs_x, powers))
+        traj_y.append(np.dot(coeffs_y, powers))
 
     return np.array(traj_x), np.array(traj_y)
 
 
-def evaluate_polynomial_trajectory_time(x_opt, segment_times, poly_order=7, num_points_per_segment=50):
-    n_segments = len(segment_times)
-    n_coeff = poly_order + 1
-    traj_x, traj_y = [], []
 
-    for i in range(n_segments):
-        T = segment_times[i]
-        idx_x = (i * 2) * n_coeff
-        idx_y = (i * 2 + 1) * n_coeff
-
-        coeffs_x = x_opt[idx_x:idx_x + n_coeff].flatten()
-        coeffs_y = x_opt[idx_y:idx_y + n_coeff].flatten()
-
-        ts = np.linspace(0, T, num_points_per_segment, endpoint=True)
-        for t in ts:
-            powers = np.array([t**j for j in range(n_coeff)])
-            traj_x.append(np.dot(coeffs_x, powers))
-            traj_y.append(np.dot(coeffs_y, powers))
-
-    return np.array(traj_x), np.array(traj_y)
 
 
 
@@ -166,27 +155,37 @@ def build_continuity_constraints(path_real, order=3):
     b_cont = np.zeros((A_cont.shape[0], 1))
     return A_cont, b_cont, b_cont
 
-def build_initial_derivative_constraints(path_real, velocity=None):
+def build_initial_derivative_constraints(path_real, velocity_start=None, velocity_end=None):
     """
-    Fixiert die Richtung (1. Ableitung) am Startpunkt, optional auch am Ende.
-    velocity: np.array([vx, vy]) oder None
+    Setzt Start- und/oder Endgeschwindigkeit als Gleichungen.
     """
     n_coeff = 6
     dim = 2
     n_segments = len(path_real) - 1
     n_vars = n_segments * n_coeff * dim
 
-    if velocity is None:
-        velocity = np.array([0.0, 0.0])
+    constraints = []
+    rhs = []
 
-    A = np.zeros((2, n_vars))
-    b = np.zeros((2, 1))
+    if velocity_start is not None:
+        deriv1_basis_start = np.array([0, 1, 0, 0, 0, 0])
+        for axis in range(dim):
+            row = np.zeros(n_vars)
+            idx = axis * n_coeff
+            row[idx:idx + n_coeff] = deriv1_basis_start
+            constraints.append(row)
+            rhs.append(velocity_start[axis])
 
-    deriv1_basis = np.array([0, 1, 0, 0, 0, 0])  # Ableitung bei t = 0
+    if velocity_end is not None:
+        deriv1_basis_end = np.array([0, 1, 2, 3, 4, 5])  # t=1 abgeleitet
+        for axis in range(dim):
+            row = np.zeros(n_vars)
+            idx = ((n_segments - 1) * dim + axis) * n_coeff
+            row[idx:idx + n_coeff] = deriv1_basis_end
+            constraints.append(row)
+            rhs.append(velocity_end[axis])
 
-    for axis in range(dim):  # 0=x, 1=y
-        idx = axis * n_coeff
-        A[axis, idx:idx + n_coeff] = deriv1_basis
-        b[axis, 0] = velocity[axis]
-
+    A = np.vstack(constraints)
+    b = np.array(rhs).reshape(-1, 1)
     return A, b, b
+

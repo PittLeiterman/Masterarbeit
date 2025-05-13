@@ -4,11 +4,11 @@ from utils.path_manipulation import simplify_path
 from optimization.preparation import (
     build_minimum_snap_qp,
     build_position_constraints,
-    evaluate_polynomial_trajectory_path,
     evaluate_polynomial_trajectory_time,
     build_continuity_constraints,
     build_initial_derivative_constraints,
 )
+from optimization.trajectory_admm_optimizer import run_admm_trajectory_optimization
 from optimization.primal_step import admm_trajectory_opt, plot_segment_lengths
 
 from optimization.admm import (
@@ -71,7 +71,11 @@ H, g = build_minimum_snap_qp(path_real)
 # -------------------
 A_pos, l_pos, u_pos = build_position_constraints(path_real)
 A_cont, l_cont, u_cont = build_continuity_constraints(path_real, order=3)
-A_init, l_init, u_init = build_initial_derivative_constraints(path_real, velocity=np.array([1.0, 0.0]))
+A_init, l_init, u_init = build_initial_derivative_constraints(
+    path_real,
+    velocity_start=np.array([0.0, 1.0]),
+    velocity_end=np.array([0.0, 0.0])
+)
 
 # -------------------
 # 3. Alle Constraints zusammenführen
@@ -91,48 +95,62 @@ prob = QPProb(H, g, A, l, u)
 x_opt, _, _ = admm_solve(prob, tol=1e-3, max_iter=1000)
 
 # Werte berechnen
-traj_x, traj_y = evaluate_polynomial_trajectory_path(x_opt, path_real, poly_order=5)
+traj_x, traj_y = evaluate_polynomial_trajectory_time(x_opt, num_points=60, poly_order=5)
 
 
-num_segments = len(path_real) - 1
-segment_times = np.ones(num_segments) * 1.0  # z. B. 1 Sekunde pro Segment
 
-x_primal = admm_trajectory_opt(
-    num_segments=num_segments,
-    segment_times=segment_times,
-    start=start_xy,
-    goal=goal_xy,
-    velocity_start=np.array([1.0, 0.0]),
-    velocity_end=np.array([1.0, 0.0]),
-    convex_regions=(A_list, b_list),  # <- Deine gültigen Regionen
-    max_iter=50,
-    tol=1e-3,
+# num_segments = len(path_real) - 1
+# segment_times = np.ones(num_segments) * 1.0  # z. B. 1 Sekunde pro Segment
+
+# x_primal = admm_trajectory_opt(
+#     num_segments=num_segments,
+#     segment_times=segment_times,
+#     start=start_xy,
+#     goal=goal_xy,
+#     velocity_start=np.array([1.0, 0.0]),
+#     velocity_end=np.array([1.0, 0.0]),
+#     convex_regions=(A_list, b_list),  # <- Deine gültigen Regionen
+#     max_iter=50,
+#     tol=1e-3,
+#     rho=1.0,
+#     debug=True  # optional für Residuenanzeige
+# )
+
+# def evaluate_last_point(x_opt, segment_times, poly_order=7):
+#     n_coeffs = poly_order + 1
+#     seg = len(segment_times) - 1
+#     T = segment_times[seg]
+
+#     coeffs_x = x_opt[(seg * 2) * n_coeffs:(seg * 2 + 1) * n_coeffs].flatten()
+#     coeffs_y = x_opt[(seg * 2 + 1) * n_coeffs:(seg * 2 + 2) * n_coeffs].flatten()
+
+#     xT = np.polyval(coeffs_x[::-1], T)
+#     yT = np.polyval(coeffs_y[::-1], T)
+
+#     return xT, yT
+
+# xT, yT = evaluate_last_point(x_primal, segment_times)
+# print("Manuell berechneter Zielpunkt bei T:", (xT, yT))
+# print("Zielpunkt (soll):", goal_xy)
+
+
+# traj_x_primal, traj_y_primal = evaluate_polynomial_trajectory_time(x_primal, segment_times, poly_order=7)
+
+# print("Zielpunkt (soll):", goal_xy)
+# print("Trajektorien-Endpunkt (ist):", traj_x_primal[-1], traj_y_primal[-1])
+
+initial_points = np.stack([traj_x, traj_y], axis=1)
+
+# ADMM starten
+optimized_points = run_admm_trajectory_optimization(
+    initial_points,
+    A_list=A_list,
+    b_list=b_list,
+    max_iter=20,
     rho=1.0,
-    debug=True  # optional für Residuenanzeige
+    alpha=0.98
 )
 
-def evaluate_last_point(x_opt, segment_times, poly_order=7):
-    n_coeffs = poly_order + 1
-    seg = len(segment_times) - 1
-    T = segment_times[seg]
-
-    coeffs_x = x_opt[(seg * 2) * n_coeffs:(seg * 2 + 1) * n_coeffs].flatten()
-    coeffs_y = x_opt[(seg * 2 + 1) * n_coeffs:(seg * 2 + 2) * n_coeffs].flatten()
-
-    xT = np.polyval(coeffs_x[::-1], T)
-    yT = np.polyval(coeffs_y[::-1], T)
-
-    return xT, yT
-
-xT, yT = evaluate_last_point(x_primal, segment_times)
-print("Manuell berechneter Zielpunkt bei T:", (xT, yT))
-print("Zielpunkt (soll):", goal_xy)
-
-
-traj_x_primal, traj_y_primal = evaluate_polynomial_trajectory_time(x_primal, segment_times, poly_order=7)
-
-print("Zielpunkt (soll):", goal_xy)
-print("Trajektorien-Endpunkt (ist):", traj_x_primal[-1], traj_y_primal[-1])
 
 
 # ---------------------------------
@@ -140,7 +158,7 @@ print("Trajektorien-Endpunkt (ist):", traj_x_primal[-1], traj_y_primal[-1])
 # ---------------------------------
 ax = pdc.visualize_environment(Al=A_list, bl=b_list, p=path_real, planar=True)
 
-plot_segment_lengths(x_primal, segment_times, poly_order=7, ax=ax)
+# plot_segment_lengths(x_primal, segment_times, poly_order=7, ax=ax)
 
 # Letzten Punkt aus Primal-Trajektorie anzeigen
 # plt.plot(traj_x_primal[-1], traj_y_primal[-1], 'kx', markersize=10, label="Letzter Punkt (Primal)")
@@ -164,6 +182,16 @@ path_array = np.array([(y, x) for (x, y) in path])
 # ax.plot(path_array[:, 0], path_array[:, 1], '--', color="orange", linewidth=1.5, label="A*-Pfad (voll)")
 
 ax.plot(traj_x, traj_y, color="red", linestyle="-", linewidth=2, label="ADMM-Trajektorie")
+# Zeitabgetastete Punkte markieren (z.B. als schwarze Punkte)
+ax.plot(traj_x, traj_y, 'ko', markersize=3, label="Zeit-Stützstellen")
+
+# Orangene gestrichelte Linie
+ax.plot(optimized_points[:, 0], optimized_points[:, 1], linestyle='--', color='orange', linewidth=2, label="Optimierte Trajektorie (ADMM)")
+
+# Kreuz-Marker an Punkten
+ax.plot(optimized_points[:, 0], optimized_points[:, 1], 'x', color='orange', markersize=6)
+
+
 
 
 # Legende und Plot anzeigen

@@ -337,7 +337,7 @@ def admm_trajectory_opt(
             plt.grid(True)
             plt.legend()
             plt.title(f"ADMM Iteration {i+1}")
-            plt.pause(3)  # Optional: kurze Pause zum Anschauen
+            plt.pause(0.5)  # Optional: kurze Pause zum Anschauen
             plt.close()
 
 
