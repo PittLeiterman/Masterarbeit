@@ -36,20 +36,26 @@ def generate_forest(n_trees, area_size, min_distance):
     
     return np.array(trees)
 
-def load_forest_from_file(filepath):
+def load_forest_from_file(filepath, include_border=True):
     """
     Lädt Baumpositionen aus einer Textdatei.
     Jede Zeile: x y (getrennt durch Leerzeichen)
-    """
-
     
+    Args:
+        filepath (str): Pfad zur Textdatei mit Baumkoordinaten.
+        include_border (bool): Wenn True, werden zusätzlich border_trees angehängt.
+    """
     try:
         forest = np.loadtxt(filepath)
         if forest.ndim == 1:
             forest = np.expand_dims(forest, axis=0)  # handle single-line file
-        return np.vstack([forest, np.array(border_trees)])
+        if include_border:
+            return np.vstack([forest, np.array(border_trees)])
+        else:
+            return forest
     except Exception as e:
         raise RuntimeError(f"Fehler beim Laden der Datei '{filepath}': {e}")
+
 
 def create_occupancy_grid(forest, area_size, grid_size, tree_size=0):
     """
