@@ -180,10 +180,13 @@ def build_initial_derivative_constraints(path_real, velocity_start=None, velocit
         deriv1_basis_end = np.array([0, 1, 2, 3, 4, 5])  # t=1 abgeleitet
         for axis in range(dim):
             row = np.zeros(n_vars)
-            idx = ((n_segments - 1) * dim + axis) * n_coeff
+            # Korrekt: Letzter Segmentindex für gegebene Achse
+            seg_idx = n_segments - 1
+            idx = (seg_idx * dim + axis) * n_coeff
             row[idx:idx + n_coeff] = deriv1_basis_end
             constraints.append(row)
             rhs.append(velocity_end[axis])
+
 
     A = np.vstack(constraints)
     b = np.array(rhs).reshape(-1, 1)
