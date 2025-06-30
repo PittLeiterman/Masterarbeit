@@ -21,6 +21,9 @@ def simplify_path(path):
     # Jetzt nur jede zweite Ecke behalten (außer Start und Ziel)
     reduced = [knicks[0]] + knicks[1:-1][::2] + [knicks[-1]]
     reduced.insert(2, knicks[2])  # Erste Ecke immer behalten
+    for index in sorted([3, 2, 1], reverse=True):
+        if len(reduced) > index:
+            del reduced[index]
     return reduced
 
 

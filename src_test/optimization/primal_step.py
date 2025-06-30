@@ -1,348 +1,99 @@
 import numpy as np
-from scipy.special import factorial
-import cvxpy as cp
-from optimization.admm import QPProb, admm_solve
-from matplotlib import pyplot as plt
-from optimization.preparation import evaluate_polynomial_trajectory_time
-
-def project_point_onto_convex_set(p, A, b):
-    """
-    Projektion eines Punkts p = [x, y] auf die konvexe Menge {x | Ax ≤ b}
-    Rückgabe: projizierter Punkt (2D)
-    """
-    x_var = cp.Variable(2)
-    objective = cp.Minimize(cp.sum_squares(x_var - p))
-    b = np.asarray(b).flatten()
-    constraints = [A @ x_var <= b]
-    prob = cp.Problem(objective, constraints)
-    prob.solve(solver=cp.OSQP)
-    return x_var.value
-
-def project_onto_convex_regions(x, A_list, b_list, segment_times, poly_order=7):
-    """
-    Projiziert die Endpunkte jedes Segments auf die zugehörigen konvexen Regionen.
-    
-    Args:
-        x: Optimierungsvariable x (Koeffizientenvektor, shape (n,))
-        A_list, b_list: Liste der Constraints pro Segment (A @ x ≤ b)
-        segment_times: Liste der Segmentlängen
-        poly_order: Grad der Polynome (Standard: 7 → 8 Koeffizienten)
-    
-    Returns:
-        z: projizierter Punkt-Vektor (gleiche Dimension wie x)
-    """
-    n_segments = len(segment_times)
-    n_coeffs = poly_order + 1
-    z = x.copy()
-
-    for i in range(n_segments):
-        T = segment_times[i]
-        idx_x = (i * 2 + 0) * n_coeffs
-        idx_y = (i * 2 + 1) * n_coeffs
-        coeffs_x = x[idx_x:idx_x + n_coeffs].flatten()
-        coeffs_y = x[idx_y:idx_y + n_coeffs].flatten()
-
-        # Evaluiere Endpunkt bei T
-        powers = np.array([T**j for j in range(n_coeffs)])
-        end_x = np.dot(coeffs_x, powers)
-        end_y = np.dot(coeffs_y, powers)
-        p = np.array([end_x, end_y])
-
-        # Projiziere auf die passende Region
-        A = A_list[i]
-        b = b_list[i]
-        proj = project_point_onto_convex_set(p, A, b)
-
-        # Setze neuen Endpunkt, indem wir a₀ anpassen (für Start bei p_proj)
-        z[idx_x + 0] += proj[0] - end_x  # Verschiebe a₀ in x
-        z[idx_y + 0] += proj[1] - end_y  # Verschiebe a₀ in y
-
-    return z
-
-def build_minimum_snap_qp_primal(num_segments, segment_times, poly_order=7):
-    """
-    Erzeugt H, g für Snap-Minimierung bei festen Zeiten und num_segments.
-    """
-    dim = 2  # x und y
-    n_coeffs = poly_order + 1
-    total_vars = num_segments * n_coeffs * dim
-    H = np.zeros((total_vars, total_vars))
-    g = np.zeros((total_vars, 1))
-
-    for seg in range(num_segments):
-        T = segment_times[seg]
-        for d in range(dim):
-            offset = (seg * 2 + d) * n_coeffs
-            H_seg = np.zeros((n_coeffs, n_coeffs))
-            for i in range(4, n_coeffs):
-                for j in range(4, n_coeffs):
-                    H_seg[i, j] = (
-                        factorial(i) / factorial(i - 4)
-                        * factorial(j) / factorial(j - 4)
-                        / (i + j - 7)
-                        * T ** (i + j - 7)
-                    )
-            H[offset:offset+n_coeffs, offset:offset+n_coeffs] = H_seg
-    return H, g
-
-
-def build_initial_derivative_constraints_primal(num_segments, start, velocity=None, poly_order=7):
-    """
-    Erzeugt Startconstraints für Position (und optional Geschwindigkeit)
-    """
-    dim = 2
-    n_coeffs = poly_order + 1
-    total_vars = num_segments * n_coeffs * dim
-    rows = []
-    l = []
-    u = []
-
-    # Position
-    for d in range(dim):
-        A_row = np.zeros((1, total_vars))
-        A_row[0, d * n_coeffs + 0] = 1  # t^0
-        rows.append(A_row)
-        l.append([start[d]])
-        u.append([start[d]])
-
-    # Geschwindigkeit (optional)
-    if velocity is not None:
-        for d in range(dim):
-            A_row = np.zeros((1, total_vars))
-            A_row[0, d * n_coeffs + 1] = 1  # Ableitung t^1
-            rows.append(A_row)
-            l.append([velocity[d]])
-            u.append([velocity[d]])
-
-    A = np.vstack(rows)
-    l = np.vstack(l)
-    u = np.vstack(u)
-    return A, l, u
-
-
-def build_terminal_derivative_constraints_primal(num_segments, goal, velocity=None, segment_times=None, poly_order=7):
-    """
-    Erzeugt Endconstraints für Position (und optional Geschwindigkeit) für das letzte Segment.
-    """
-    dim = 2
-    n_coeffs = poly_order + 1
-    total_vars = num_segments * n_coeffs * dim
-    rows = []
-    l = []
-    u = []
-    T = segment_times[-1]
-
-    for d in range(dim):
-        A_row = np.zeros((1, total_vars))
-        for i in range(n_coeffs):
-            index = ((num_segments - 1) * 2 + d) * n_coeffs + i
-            A_row[0, index] = T ** i
-        rows.append(A_row)
-        l.append([goal[d]])
-        u.append([goal[d]])
-
-    # Geschwindigkeit (optional)
-    if velocity is not None:
-        for d in range(dim):
-            A_row = np.zeros((1, total_vars))
-            for i in range(1, n_coeffs):
-                index = ((num_segments - 1) * 2 + d) * n_coeffs + i
-                A_row[0, index] = i * T ** (i - 1)
-            rows.append(A_row)
-            l.append([velocity[d]])
-            u.append([velocity[d]])
-
-    A = np.vstack(rows)
-    l = np.vstack(l)
-    u = np.vstack(u)
-    return A, l, u
-
-
-
-def build_continuity_constraints_primal(num_segments, segment_times, order=3, poly_order=7):
-    """
-    Erzwingt C^order-Kontinuität an Segmentübergängen.
-    """
-    dim = 2
-    n_coeffs = poly_order + 1
-    total_vars = num_segments * n_coeffs * dim
-    rows = []
-    l = []
-    u = []
-
-    for seg in range(num_segments - 1):
-        T = segment_times[seg]
-        for d in range(dim):
-            for k in range(order + 1):  # Ableitungsgrad
-                A_row = np.zeros((1, total_vars))
-
-                # rechter Rand Segment seg
-                for i in range(k, n_coeffs):
-                    A_row[0, (seg * dim + d) * n_coeffs + i] = (
-                        factorial(i) / factorial(i - k) * T ** (i - k)
-                    )
-
-                # linker Rand Segment seg+1
-                for i in range(k, n_coeffs):
-                    A_row[0, ((seg + 1) * dim + d) * n_coeffs + i] -= (
-                        factorial(i) / factorial(i - k) * 0 ** (i - k)
-                    )
-
-                rows.append(A_row)
-                l.append([0.0])
-                u.append([0.0])
-
-    A = np.vstack(rows)
-    l = np.vstack(l)
-    u = np.vstack(u)
-    return A, l, u
-
+import matplotlib.pyplot as plt
 import cvxpy as cp
 
-def solve_qp_cvxpy(H, g, A, l, u):
-    x = cp.Variable(H.shape[0])
-    objective = cp.Minimize(0.5 * cp.quad_form(x, H) + g.T @ x)
-    constraints = [A @ x >= l.flatten(), A @ x <= u.flatten()]
-    prob = cp.Problem(objective, constraints)
-    print("Lösen des QP-Problems...")
-    prob.solve(solver=cp.OSQP)  # alternativ: SCS, ECOS, etc.
-    return x.value.reshape((H.shape[0], 1))
+def get_snap_cost_matrix(dt):
+    Q = np.zeros((6, 6))
+    Q[4, 4] = 24**2 * dt
+    Q[4, 5] = Q[5, 4] = 24 * 120 * dt**2 / 2
+    Q[5, 5] = 120**2 * dt**3 / 3
+    return Q
 
 
 
-def plot_segment_lengths(x_opt, segment_times, poly_order=7, num_points=100, ax=None):
-    """
-    Zeichnet die räumlichen Trajektorien jedes Segments (z.B. aus dem Primal Step)
-    in ein gegebenes matplotlib-Axes-Objekt.
+def minimum_snap_trajectory(start_xy, goal_xy, v_start, v_end, num_segments=5):
 
-    Parameters:
-    - x_opt: Optimierte Polynomkoeffizienten
-    - segment_times: Liste der Zeitdauern je Segment
-    - poly_order: Grad des Polynoms (Standard: 7 → 8 Koeffizienten)
-    - num_points: Auflösung pro Segment
-    - ax: matplotlib Axes-Objekt (z. B. aus Hauptplot). Falls None → aktuelles wird verwendet.
-    
-    Returns:
-    - lengths: Liste der räumlichen Längen je Segment
-    """
-    if ax is None:
-        import matplotlib.pyplot as plt
-        ax = plt.gca()
+    # Zeitverteilung
+    distance = np.linalg.norm(np.array(goal_xy) - np.array(start_xy))
+    avg_velocity = (np.linalg.norm(v_start) + np.linalg.norm(v_end)) / 2
+    total_time = distance / avg_velocity if avg_velocity != 0 else 1.0
+    segment_times = np.linspace(0, total_time, num_segments + 1)
 
-    num_segments = len(segment_times)
-    n_coeffs = poly_order + 1
-    lengths = []
+    coeffs_x = []
+    coeffs_y = []
+    constraints = []
+    cost = 0
 
+    # Variablen und Kosten definieren
     for i in range(num_segments):
-        coeffs_x = x_opt[i * 2 * n_coeffs:(i * 2 + 1) * n_coeffs].flatten()
-        coeffs_y = x_opt[(i * 2 + 1) * n_coeffs:(i * 2 + 2) * n_coeffs].flatten()
+        a_x = cp.Variable(6)
+        a_y = cp.Variable(6)
+        coeffs_x.append(a_x)
+        coeffs_y.append(a_y)
 
-        ts = np.linspace(0, segment_times[i], num_points)
-        xs = np.polyval(coeffs_x[::-1], ts)
-        ys = np.polyval(coeffs_y[::-1], ts)
+        # Snap-Kosten: Gewichtung auf höchstem Ableitungsanteil
+        dt = segment_times[i+1] - segment_times[i]
+        Q = get_snap_cost_matrix(dt)
+        cost += cp.quad_form(a_x, Q) + cp.quad_form(a_y, Q)
 
-        dists = np.sqrt(np.diff(xs)**2 + np.diff(ys)**2)
-        lengths.append(np.sum(dists))
+    # Startbedingungen
+    T0 = np.array([1, 0, 0, 0, 0, 0])
+    T0_dot = np.array([0, 1, 0, 0, 0, 0])
+    constraints += [
+        coeffs_x[0] @ T0 == start_xy[0],
+        coeffs_y[0] @ T0 == start_xy[1],
+        coeffs_x[0] @ T0_dot == v_start[0],
+        coeffs_y[0] @ T0_dot == v_start[1]
+    ]
 
-        # Segmentpfad in Plot einzeichnen
-        ax.plot(xs, ys, linestyle='dotted', alpha=0.7, label=f"Segment {i} ({lengths[-1]:.2f} m)")
+    # Zielbedingungen
+    dt_end = segment_times[-1] - segment_times[-2]
+    T1 = np.array([1, dt_end, dt_end**2, dt_end**3, dt_end**4, dt_end**5])
+    T1_dot = np.array([0, 1, 2*dt_end, 3*dt_end**2, 4*dt_end**3, 5*dt_end**4])
+    constraints += [
+        coeffs_x[-1] @ T1 == goal_xy[0],
+        coeffs_y[-1] @ T1 == goal_xy[1],
+        coeffs_x[-1] @ T1_dot == v_end[0],
+        coeffs_y[-1] @ T1_dot == v_end[1]
+    ]
 
-    return lengths
+    # C³-Kontinuität
+    for i in range(num_segments - 1):
+        dt = segment_times[i+1] - segment_times[i]
 
+        # Ende von Segment i
+        T_end = np.array([1, dt, dt**2, dt**3, dt**4, dt**5])
+        T_dot_end = np.array([0, 1, 2*dt, 3*dt**2, 4*dt**3, 5*dt**4])
+        T_ddot_end = np.array([0, 0, 2, 6*dt, 12*dt**2, 20*dt**3])
+        T_dddot_end = np.array([0, 0, 0, 6, 24*dt, 60*dt**2])
 
-def solve_primal_step_with_admm(num_segments, segment_times, start, goal, velocity_start=None, velocity_end=None, z=None, lamb=None, rho=1.0):
-    H, g = build_minimum_snap_qp_primal(num_segments, segment_times)
+        # Anfang von Segment i+1 (immer t=0)
+        T_start = np.array([1, 0, 0, 0, 0, 0])
+        T_dot_start = np.array([0, 1, 0, 0, 0, 0])
+        T_ddot_start = np.array([0, 0, 2, 0, 0, 0])
+        T_dddot_start = np.array([0, 0, 0, 6, 0, 0])
 
-    # Augmented terms:
-    if z is not None and lamb is not None:
-        g = g - rho * (z - lamb / rho)  # Equivalent to shifting linear term
-        H = H + rho * np.eye(H.shape[0])  # Augment diagonals
+        constraints += [
+            coeffs_x[i] @ T_end == coeffs_x[i+1] @ T_start,
+            coeffs_y[i] @ T_end == coeffs_y[i+1] @ T_start,
 
-    A_init, l_init, u_init = build_initial_derivative_constraints_primal(
-        num_segments, start=start, velocity=velocity_start
-    )
-    A_term, l_term, u_term = build_terminal_derivative_constraints_primal(
-        num_segments, goal=goal, velocity=velocity_end, segment_times=segment_times
-    )
-    A_cont, l_cont, u_cont = build_continuity_constraints_primal(
-        num_segments, segment_times, order=3
-    )
+            coeffs_x[i] @ T_dot_end == coeffs_x[i+1] @ T_dot_start,
+            coeffs_y[i] @ T_dot_end == coeffs_y[i+1] @ T_dot_start,
 
-    A = np.vstack([A_init, A_term, A_cont])
-    l = np.vstack([l_init, l_term, l_cont])
-    u = np.vstack([u_init, u_term, u_cont])
+            coeffs_x[i] @ T_ddot_end == coeffs_x[i+1] @ T_ddot_start,
+            coeffs_y[i] @ T_ddot_end == coeffs_y[i+1] @ T_ddot_start,
 
-    prob = QPProb(H, g, A, l, u)
-    x_opt, _, _ = admm_solve(prob, tol=1e-3, max_iter=1000)
-    return x_opt
+            coeffs_x[i] @ T_dddot_end == coeffs_x[i+1] @ T_dddot_start,
+            coeffs_y[i] @ T_dddot_end == coeffs_y[i+1] @ T_dddot_start,
+        ]
 
+    # Optimierung lösen
+    prob = cp.Problem(cp.Minimize(cost), constraints)
+    prob.solve()
 
-def admm_trajectory_opt(
-    num_segments,
-    segment_times,
-    start,
-    goal,
-    velocity_start,
-    velocity_end,
-    convex_regions,
-    max_iter=50,
-    tol=1e-3,
-    rho=1.0,
-    debug=False
-):
-    n_vars = num_segments * (7 + 1) * 2  # poly_order + 1, dim=2
-    x = np.zeros((n_vars, 1))
-    z = np.zeros_like(x)
-    lamb = np.zeros_like(x)
-
-    for i in range(max_iter):
-        # x-Update: Primal Step mit Augmented Termen
-        x = solve_primal_step_with_admm(
-            num_segments,
-            segment_times,
-            start=start,
-            goal=goal,
-            velocity_start=velocity_start,
-            velocity_end=velocity_end,
-            z=z,
-            lamb=lamb,
-            rho=rho
-        )
-
-        # z-Update: Projektion auf konvexe Regionen
-        z_old = z.copy()
-        A_list, b_list = convex_regions
-        z = project_onto_convex_regions(x + lamb / rho, A_list, b_list, segment_times)
-
-        # λ-Update
-        lamb += rho * (x - z)
-
-        # Residuen
-        primal_res = np.linalg.norm(x - z)
-        dual_res = np.linalg.norm(z - z_old)
-
-        if debug:
-            print(f"Iter {i:3d}: r_p = {primal_res:.2e}, r_d = {dual_res:.2e}")
-
-            # Debug-Plot der aktuellen x- und z-Trajektorie
-            traj_x_x, traj_y_x = evaluate_polynomial_trajectory_time(x, segment_times, poly_order=7)
-            traj_x_z, traj_y_z = evaluate_polynomial_trajectory_time(z, segment_times, poly_order=7)
-
-            plt.figure(figsize=(6, 6))
-            plt.plot(traj_x_x, traj_y_x, label="x (Primal Step)", color="purple", linewidth=2)
-            plt.plot(traj_x_z, traj_y_z, label="z (Projektion)", color="green", linestyle="--")
-            plt.scatter(traj_x_x[-1], traj_y_x[-1], c="purple", marker="x", label="Endpunkt x")
-            plt.scatter(traj_x_z[-1], traj_y_z[-1], c="green", marker="o", label="Endpunkt z")
-            plt.axis("equal")
-            plt.grid(True)
-            plt.legend()
-            plt.title(f"ADMM Iteration {i+1}")
-            plt.pause(0.5)  # Optional: kurze Pause zum Anschauen
-            plt.close()
+    return coeffs_x, coeffs_y, segment_times
 
 
-        if primal_res < tol and dual_res < tol:
-            print(f"Converged in {i + 1} iterations.")
-            break
 
-    return x
+def evaluate_polynomial(coeffs, t):
+    return sum(c * t**i for i, c in enumerate(coeffs))

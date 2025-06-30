@@ -1,26 +1,23 @@
 import numpy as np
 
-border_trees = [
-    # Untere Kante (y=0)
-    (0.0, 0.0), (2.0, 0.0), (4.0, 0.0), (6.0, 0.0), (8.0, 0.0),
-    (10.0, 0.0), (12.0, 0.0), (14.0, 0.0), (16.0, 0.0), (18.0, 0.0),
-    (20.0, 0.0), (22.0, 0.0), (24.0, 0.0), (25.0, 0.0),
+border_trees = []
 
-    # Obere Kante (y=25)
-    (0.0, 25.0), (2.0, 25.0), (4.0, 25.0), (6.0, 25.0), (8.0, 25.0),
-    (10.0, 25.0), (12.0, 25.0), (14.0, 25.0), (16.0, 25.0), (18.0, 25.0),
-    (20.0, 25.0), (22.0, 25.0), (24.0, 25.0), (25.0, 25.0),
+# Untere Kante (y = 0)
+for x in range(0, 26):  # 0 bis 25
+    border_trees.append((x, 0.0))
 
-    # Linke Kante (x=0), ohne Ecken
-    (0.0, 2.0), (0.0, 4.0), (0.0, 6.0), (0.0, 8.0), (0.0, 10.0),
-    (0.0, 12.0), (0.0, 14.0), (0.0, 16.0), (0.0, 18.0), (0.0, 20.0),
-    (0.0, 22.0), (0.0, 24.0),
+# Obere Kante (y = 25)
+for x in range(0, 26):
+    border_trees.append((x, 25.0))
 
-    # Rechte Kante (x=25), ohne Ecken
-    (25.0, 2.0), (25.0, 4.0), (25.0, 6.0), (25.0, 8.0), (25.0, 10.0),
-    (25.0, 12.0), (25.0, 14.0), (25.0, 16.0), (25.0, 18.0), (25.0, 20.0),
-    (25.0, 22.0), (25.0, 24.0)
-]
+# Linke Kante (x = 0), ohne Ecken
+for y in range(1, 25):  # ohne 0 und 25
+    border_trees.append((0.0, y))
+
+# Rechte Kante (x = 25), ohne Ecken
+for y in range(1, 25):
+    border_trees.append((25.0, y))
+
 
 def generate_forest(n_trees, area_size, min_distance):
     np.random.seed(0)  # 👈 sets the random seed
