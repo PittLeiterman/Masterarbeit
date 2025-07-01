@@ -14,6 +14,7 @@ def project_point_to_polyhedron(A, b, point):
     x = cp.Variable(2)
     objective = cp.Minimize(cp.sum_squares(x - point))
     constraints = [A @ x <= np.array(b).flatten()]
+
     problem = cp.Problem(objective, constraints)
     problem.solve()
     return x.value if x.value is not None else point
@@ -47,19 +48,37 @@ def project_segments_to_convex_regions(coeffs_x, coeffs_y, segment_times, A_list
             closest = None
             closest_dist = float('inf')
 
-            for A, b in zip(A_list, b_list):
-                midpoint = np.mean(segment_points, axis=0)
-                proj = project_point_to_polyhedron(A, b, midpoint)
-                dist = np.linalg.norm(midpoint - proj)
-                if dist < closest_dist:
-                    closest = proj
-                    closest_dist = dist
+            best_proj_start = None
+            best_proj_end = None
+            closest_dist = float('inf')
 
-            # Verschiebe das ganze Segment so, dass der Mittelpunkt in die Region fällt
-            translation = closest - np.mean(segment_points, axis=0)
-            x_vals_proj = x_vals + translation[0]
-            y_vals_proj = y_vals + translation[1]
-            projected_segments_x.append(x_vals_proj)
-            projected_segments_y.append(y_vals_proj)
+            for A, b in zip(A_list, b_list):
+                start_point = segment_points[0]
+                end_point = segment_points[-1]
+
+                proj_start = project_point_to_polyhedron(A, b, start_point)
+                proj_end = project_point_to_polyhedron(A, b, end_point)
+
+                # Mittlerer Punkt der neuen Verbindung als Vergleichsgröße
+                proj_mid = (proj_start + proj_end) / 2
+                orig_mid = (start_point + end_point) / 2
+                dist = np.linalg.norm(proj_mid - orig_mid)
+
+                if dist < closest_dist:
+                    closest_dist = dist
+                    best_proj_start = proj_start
+                    best_proj_end = proj_end
+
+            # Falls eine sinnvolle Projektion gefunden wurde
+            if best_proj_start is not None and best_proj_end is not None:
+                x_vals_proj = np.linspace(best_proj_start[0], best_proj_end[0], len(t_vals))
+                y_vals_proj = np.linspace(best_proj_start[1], best_proj_end[1], len(t_vals))
+                projected_segments_x.append(x_vals_proj)
+                projected_segments_y.append(y_vals_proj)
+            else:
+                # Fallback: ursprüngliches Segment behalten
+                projected_segments_x.append(x_vals)
+                projected_segments_y.append(y_vals)
+
 
     return projected_segments_x, projected_segments_y

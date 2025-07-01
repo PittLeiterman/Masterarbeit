@@ -2,7 +2,7 @@ from input.trees2D import create_occupancy_grid, load_forest_from_file
 from pathfinder.AStar import astar
 from utils.path_manipulation import simplify_path
 
-from optimization.primal_step import minimum_snap_trajectory, evaluate_polynomial
+from optimization.primal_step import minimum_snap_trajectory, evaluate_polynomial, solve_primal_step
 from optimization.projection_utils import project_segments_to_convex_regions
 
 import pydecomp as pdc
@@ -60,7 +60,7 @@ v_start = (0.0, 0.0)  # Starting at rest
 v_end = (0.0, 0.0)    # Ending at rest
 
 # Generate trajectory coefficients
-coeffs_x, coeffs_y, segment_times = minimum_snap_trajectory(start_xy, goal_xy, v_start, v_end, num_segments=15)
+coeffs_x, coeffs_y, segment_times = minimum_snap_trajectory(start_xy, goal_xy, v_start, v_end, num_segments=30)
 
 projected_x, projected_y = project_segments_to_convex_regions(
     coeffs_x, coeffs_y, segment_times, A_list, b_list
@@ -73,7 +73,7 @@ trajectory_y = []
 segment_lengths = []
 
 for i in range(len(segment_times) - 1):
-    t_vals = np.linspace(0, segment_times[i+1] - segment_times[i], 50)
+    t_vals = np.linspace(0, segment_times[i+1] - segment_times[i], 30)
     a_x = coeffs_x[i].value
     a_y = coeffs_y[i].value
 
@@ -90,26 +90,101 @@ for i in range(len(segment_times) - 1):
     segment_lengths.append(dist)
 
 for x_vals, y_vals in zip(projected_x, projected_y):
-    ax.plot(x_vals, y_vals, 'k--', linewidth=1.5, label="projiziert" if 'projiziert' not in ax.get_legend_handles_labels()[1] else "")
-# a_x = coeffs_x[4].value
-# a_y = coeffs_y[4].value
+    ax.plot(x_vals, y_vals, 'r-', linewidth=2, label="projiziert" if 'projiziert' not in ax.get_legend_handles_labels()[1] else "")
 
-# x_vals = [evaluate_polynomial(a_x, t) for t in t_vals]
-# y_vals = [evaluate_polynomial(a_y, t) for t in t_vals]
-# x_vals_shifted = [x + 2.0 for x in x_vals]
-# ax.plot(x_vals_shifted, y_vals, color='red', linewidth=3, label='Segment 8 (verschoben)')
-# ax.plot(x_vals_shifted[0], y_vals[0], 'ro')   # Startpunkt
-# ax.plot(x_vals_shifted[-1], y_vals[-1], 'rx')
-
-
-ax.set_aspect('equal')
-ax.grid(True)
 plt.show()
 
+rho = 3000.0
+max_iters = 200
+eps = 0.3
+beta = 0.1
 
-plt.figure()
-plt.bar(range(len(segment_lengths)), segment_lengths)
-plt.title("Räumliche Länge pro Segment")
-plt.xlabel("Segmentindex")
-plt.ylabel("Strecke")
-plt.show()
+# Dummy-Initialisierung für z und u
+z_traj = [np.column_stack((x, y)) for x, y in zip(projected_x, projected_y)]
+
+# Erste Iteration: berechne u^1
+x_traj = []  # evaluate aktuelle x-Trajektorie von coeffs_x/y
+for i in range(len(segment_times) - 1):
+    t_vals = np.linspace(0, segment_times[i+1] - segment_times[i], 30)
+    a_x = coeffs_x[i].value
+    a_y = coeffs_y[i].value
+    x_vals = [evaluate_polynomial(a_x, t) for t in t_vals]
+    y_vals = [evaluate_polynomial(a_y, t) for t in t_vals]
+    x_traj.append(np.column_stack((x_vals, y_vals)))
+
+u_traj = [x - z for x, z in zip(x_traj, z_traj)]  # u^1
+
+for k in range(max_iters):
+    print(f"--- Iteration {k+1} ---")
+    if k == 0:
+        z_traj_prev = z_traj.copy()
+    if k > 0:
+        z_traj_extrapolated = [
+            z_curr + beta * (z_curr - z_prev)
+            for z_curr, z_prev in zip(z_traj, z_traj_prev)
+        ]
+    else:
+        z_traj_extrapolated = z_traj
+
+    coeffs_x, coeffs_y = solve_primal_step(
+        z_traj_extrapolated, u_traj, segment_times, start_xy, goal_xy, v_start, v_end, rho
+    )
+
+    # Neue x-Trajektorie berechnen (aus Polynomkoeffizienten)
+    x_traj = []
+    for i in range(len(segment_times) - 1):
+        t_vals = np.linspace(0, segment_times[i+1] - segment_times[i], 30)
+        a_x = coeffs_x[i].value
+        a_y = coeffs_y[i].value
+        x_vals = [evaluate_polynomial(a_x, t) for t in t_vals]
+        y_vals = [evaluate_polynomial(a_y, t) for t in t_vals]
+        x_traj.append(np.column_stack((x_vals, y_vals)))
+
+    # PROJEKTION (z^{k+1})
+    x_vals_list = [segment[:, 0] for segment in x_traj]
+    y_vals_list = [segment[:, 1] for segment in x_traj]
+
+    projected_x, projected_y = project_segments_to_convex_regions(
+        coeffs_x, coeffs_y, segment_times, A_list, b_list
+    )
+    z_traj = [np.column_stack((x, y)) for x, y in zip(projected_x, projected_y)]
+
+    # DUAL UPDATE
+    u_traj = [u + (x - z) for u, x, z in zip(u_traj, x_traj, z_traj)]
+
+    # KONVERGENZTEST
+    max_diff = max(np.linalg.norm(x - z, ord=np.inf) for x, z in zip(x_traj, z_traj))
+    print(f"Max segment difference: {max_diff:.5f}")
+
+    if max_diff < eps:
+        print("Konvergenz erreicht.")
+        break
+
+    # OPTIONAL: Zwischenstand visualisieren
+    ax = pdc.visualize_environment(Al=A_list, bl=b_list, p=path_real, planar=True)
+
+    ax.plot(start_xy[0], start_xy[1], 'go', label='Start')
+    ax.plot(goal_xy[0], goal_xy[1], 'bo', label='Goal')
+    ax.plot(forest[:, 0], forest[:, 1], "o", color="green", label="Bäume")
+
+    # Projizierte Segmente (rot)
+    already_labeled = set()
+    for x_vals, y_vals in zip(projected_x, projected_y):
+        label = "projiziert" if "projiziert" not in already_labeled else ""
+        ax.plot(x_vals, y_vals, 'r-', linewidth=2, label=label)
+        already_labeled.add("projiziert")
+
+    # Aktuelle Trajektorie (bunt)
+    for segment, color in zip(x_traj, colors):
+        ax.plot(segment[:, 0], segment[:, 1], color=color, linewidth=1.5)
+
+    ax.set_title(f"ADMM Iteration {k+1}")
+    ax.set_aspect('equal')
+    ax.grid(True)
+    ax.legend()
+    plt.pause(0.1)
+    plt.clf()
+
+    z_traj_prev = z_traj.copy()
+
+

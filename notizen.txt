@@ -1,0 +1,4 @@
+Momentum
+Regulierung durch A*
+Mehr Segmente
+min. ein Pfadsegment pro konvexe Fläche
