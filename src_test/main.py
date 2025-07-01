@@ -94,7 +94,7 @@ for x_vals, y_vals in zip(projected_x, projected_y):
 
 plt.show()
 
-rho = 3000.0
+rho = 2000.0
 max_iters = 200
 eps = 0.3
 beta = 0.1
@@ -158,6 +158,28 @@ for k in range(max_iters):
 
     if max_diff < eps:
         print("Konvergenz erreicht.")
+        ax = pdc.visualize_environment(Al=A_list, bl=b_list, p=path_real, planar=True)
+
+        ax.plot(start_xy[0], start_xy[1], 'go', label='Start')
+        ax.plot(goal_xy[0], goal_xy[1], 'bo', label='Goal')
+        ax.plot(forest[:, 0], forest[:, 1], "o", color="green", label="Bäume")
+
+        # Projizierte Segmente (rot)
+        already_labeled = set()
+        for x_vals, y_vals in zip(projected_x, projected_y):
+            label = "projiziert" if "projiziert" not in already_labeled else ""
+            ax.plot(x_vals, y_vals, 'r-', linewidth=2, label=label)
+            already_labeled.add("projiziert")
+
+        # Aktuelle Trajektorie (bunt)
+        for segment, color in zip(x_traj, colors):
+            ax.plot(segment[:, 0], segment[:, 1], color=color, linewidth=1.5)
+
+        ax.set_title(f"ADMM Iteration {k+1}")
+        ax.set_aspect('equal')
+        ax.grid(True)
+        ax.legend()
+        plt.show()
         break
 
     # OPTIONAL: Zwischenstand visualisieren
@@ -184,6 +206,8 @@ for k in range(max_iters):
     ax.legend()
     plt.pause(0.1)
     plt.clf()
+
+    
 
     z_traj_prev = z_traj.copy()
 
