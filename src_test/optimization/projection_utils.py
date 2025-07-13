@@ -1,5 +1,4 @@
 import numpy as np
-from scipy.spatial import distance
 
 def evaluate_polynomial(coeffs, t_vals):
     return np.array([sum(c * t**i for i, c in enumerate(coeffs)) for t in t_vals])
