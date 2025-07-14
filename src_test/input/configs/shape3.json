@@ -1,9 +1,9 @@
 {
     "area_size": [25,25],
-    "shape": "shape2",
+    "shape": "shape3",
     "start": [2,2],
     "goal": [23,23],
-    "keep": [0, 1, 4, -1],
+    "keep": [0, 2, 3, 5, 6, 8, 10, -1],
     "rho": 1000.0,
     "max_iters": 200,
     "eps": 0.2,
