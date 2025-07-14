@@ -18,7 +18,32 @@ def project_point_to_polyhedron(A, b, point):
     problem.solve()
     return x.value if x.value is not None else point
 
-def project_segments_to_convex_regions(coeffs_x, coeffs_y, segment_times, A_list, b_list, n_samples=30):
+def project_point_to_polyhedron_with_reference(A, b, point, ref, lambd=1.0):
+    import cvxpy as cp
+    x = cp.Variable(2)
+    objective = cp.Minimize(cp.sum_squares(x - point) + lambd * cp.sum_squares(x - ref))
+    constraints = [A @ x <= np.array(b).flatten()]
+    problem = cp.Problem(objective, constraints)
+    problem.solve()
+    return x.value if x.value is not None else point
+
+
+def find_closest_point_on_path(path_points, query_point):
+    dists = np.linalg.norm(path_points - query_point, axis=1)
+    return path_points[np.argmin(dists)]
+
+
+def project_segments_to_convex_regions(
+    coeffs_x,
+    coeffs_y,
+    segment_times,
+    A_list,
+    b_list,
+    path_reference=None,
+    use_path_guidance=False,
+    lambda_path=1.0,
+    n_samples=30
+):
     projected_segments_x = []
     projected_segments_y = []
 
@@ -26,7 +51,7 @@ def project_segments_to_convex_regions(coeffs_x, coeffs_y, segment_times, A_list
         a_x = coeffs_x[i].value
         a_y = coeffs_y[i].value
 
-        t_vals = np.linspace(0, segment_times[i+1] - segment_times[i], n_samples)
+        t_vals = np.linspace(0, segment_times[i + 1] - segment_times[i], n_samples)
         x_vals = evaluate_polynomial(a_x, t_vals)
         y_vals = evaluate_polynomial(a_y, t_vals)
         segment_points = np.stack([x_vals, y_vals], axis=1)
@@ -43,22 +68,29 @@ def project_segments_to_convex_regions(coeffs_x, coeffs_y, segment_times, A_list
             projected_segments_x.append(x_vals)
             projected_segments_y.append(y_vals)
         else:
-            # Projektiere alle Punkte einzeln (alternativ: mittleren Punkt nehmen)
-            closest = None
-            closest_dist = float('inf')
-
+            # Projektion notwendig
             best_proj_start = None
             best_proj_end = None
             closest_dist = float('inf')
 
+            start_point = segment_points[0]
+            end_point = segment_points[-1]
+
+            if use_path_guidance and path_reference is not None:
+                ref_start = find_closest_point_on_path(path_reference, start_point)
+                ref_end = find_closest_point_on_path(path_reference, end_point)
+            else:
+                ref_start = start_point
+                ref_end = end_point
+
             for A, b in zip(A_list, b_list):
-                start_point = segment_points[0]
-                end_point = segment_points[-1]
+                if use_path_guidance and path_reference is not None:
+                    proj_start = project_point_to_polyhedron_with_reference(A, b, start_point, ref_start, lambd=lambda_path)
+                    proj_end = project_point_to_polyhedron_with_reference(A, b, end_point, ref_end, lambd=lambda_path)
+                else:
+                    proj_start = project_point_to_polyhedron(A, b, start_point)
+                    proj_end = project_point_to_polyhedron(A, b, end_point)
 
-                proj_start = project_point_to_polyhedron(A, b, start_point)
-                proj_end = project_point_to_polyhedron(A, b, end_point)
-
-                # Mittlerer Punkt der neuen Verbindung als Vergleichsgröße
                 proj_mid = (proj_start + proj_end) / 2
                 orig_mid = (start_point + end_point) / 2
                 dist = np.linalg.norm(proj_mid - orig_mid)
@@ -68,16 +100,13 @@ def project_segments_to_convex_regions(coeffs_x, coeffs_y, segment_times, A_list
                     best_proj_start = proj_start
                     best_proj_end = proj_end
 
-            # Falls eine sinnvolle Projektion gefunden wurde
             if best_proj_start is not None and best_proj_end is not None:
                 x_vals_proj = np.linspace(best_proj_start[0], best_proj_end[0], len(t_vals))
                 y_vals_proj = np.linspace(best_proj_start[1], best_proj_end[1], len(t_vals))
                 projected_segments_x.append(x_vals_proj)
                 projected_segments_y.append(y_vals_proj)
             else:
-                # Fallback: ursprüngliches Segment behalten
                 projected_segments_x.append(x_vals)
                 projected_segments_y.append(y_vals)
-
 
     return projected_segments_x, projected_segments_y

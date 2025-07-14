@@ -23,6 +23,9 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     beta = config["beta"]
     v_start = tuple(config["v_start"])
     v_end = tuple(config["v_end"])
+    use_path_guidance = config.get("use_path_guidance")
+    lambda_path = config.get("lambda_path")
+    num_segments = config.get("num_segments")
 
 
     # Baum- und Grid-Erzeugung
@@ -96,18 +99,22 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     ax.plot(obstacles[:, 0], obstacles[:, 1], "o", color="green", label="Bäume")
 
     # Generate trajectory coefficients
-    coeffs_x, coeffs_y, segment_times = minimum_snap_trajectory(start_xy, goal_xy, v_start, v_end, num_segments=30)
+    coeffs_x, coeffs_y, segment_times = minimum_snap_trajectory(start_xy, goal_xy, v_start, v_end, num_segments=num_segments)
 
     projected_x, projected_y = project_segments_to_convex_regions(
-        coeffs_x, coeffs_y, segment_times, A_list, b_list
-    )
+            coeffs_x, coeffs_y, segment_times, A_list, b_list,
+            path_reference=path_real,
+            use_path_guidance=use_path_guidance,
+            lambda_path=lambda_path,
+            n_samples=num_segments
+        )
 
     colors = cm.viridis(np.linspace(0, 1, len(segment_times) - 1))
 
     segment_lengths = []
 
     for i in range(len(segment_times) - 1):
-        t_vals = np.linspace(0, segment_times[i+1] - segment_times[i], 30)
+        t_vals = np.linspace(0, segment_times[i+1] - segment_times[i], num_segments)
         a_x = coeffs_x[i].value
         a_y = coeffs_y[i].value
 
@@ -130,7 +137,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     # Erste Iteration: berechne u^1
     x_traj = []
     for i in range(len(segment_times) - 1):
-        t_vals = np.linspace(0, segment_times[i+1] - segment_times[i], 30)
+        t_vals = np.linspace(0, segment_times[i+1] - segment_times[i], num_segments)
         a_x = coeffs_x[i].value
         a_y = coeffs_y[i].value
         x_vals = [evaluate_polynomial(a_x, t) for t in t_vals]
@@ -158,7 +165,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         # Neue x-Trajektorie berechnen (aus Polynomkoeffizienten)
         x_traj = []
         for i in range(len(segment_times) - 1):
-            t_vals = np.linspace(0, segment_times[i+1] - segment_times[i], 30)
+            t_vals = np.linspace(0, segment_times[i+1] - segment_times[i], num_segments)
             a_x = coeffs_x[i].value
             a_y = coeffs_y[i].value
             x_vals = [evaluate_polynomial(a_x, t) for t in t_vals]
@@ -166,7 +173,11 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
             x_traj.append(np.column_stack((x_vals, y_vals)))
 
         projected_x, projected_y = project_segments_to_convex_regions(
-            coeffs_x, coeffs_y, segment_times, A_list, b_list
+            coeffs_x, coeffs_y, segment_times, A_list, b_list,
+            path_reference=path_real,
+            use_path_guidance=use_path_guidance,
+            lambda_path=lambda_path,
+            n_samples=num_segments
         )
         z_traj = [np.column_stack((x, y)) for x, y in zip(projected_x, projected_y)]
 
