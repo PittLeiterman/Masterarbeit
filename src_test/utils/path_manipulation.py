@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.interpolate import interp1d
 
 def simplify_path(path, keep_indices=None):
     """
@@ -42,3 +43,18 @@ def simplify_path(path, keep_indices=None):
 
 
 
+def upsample_path(path_real, num_points):
+    # Schritt 1: Berechne kumulative Distanzen (Weglängen)
+    deltas = np.diff(path_real, axis=0)
+    segment_lengths = np.hypot(deltas[:, 0], deltas[:, 1])
+    cumulative_lengths = np.concatenate([[0], np.cumsum(segment_lengths)])
+
+    # Schritt 2: Erzeuge neue gleichmäßig verteilte Längenwerte
+    target_lengths = np.linspace(0, cumulative_lengths[-1], num_points)
+
+    # Schritt 3: Interpolation entlang der Pfadlänge
+    interp_x = interp1d(cumulative_lengths, path_real[:, 0], kind='linear')
+    interp_y = interp1d(cumulative_lengths, path_real[:, 1], kind='linear')
+
+    upsampled_path = np.stack([interp_x(target_lengths), interp_y(target_lengths)], axis=1)
+    return upsampled_path

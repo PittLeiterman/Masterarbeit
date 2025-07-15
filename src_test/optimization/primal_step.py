@@ -11,7 +11,7 @@ def get_snap_cost_matrix(dt):
 
 
 
-def minimum_snap_trajectory(start_xy, goal_xy, v_start, v_end, num_segments=5):
+def minimum_snap_trajectory(start_xy, goal_xy, v_start, v_end, path, psi, num_segments=30):
 
     # Zeitverteilung
     distance = np.linalg.norm(np.array(goal_xy) - np.array(start_xy))
@@ -24,6 +24,7 @@ def minimum_snap_trajectory(start_xy, goal_xy, v_start, v_end, num_segments=5):
     constraints = []
     cost = 0
 
+
     # Variablen und Kosten definieren
     for i in range(num_segments):
         a_x = cp.Variable(6)
@@ -35,6 +36,22 @@ def minimum_snap_trajectory(start_xy, goal_xy, v_start, v_end, num_segments=5):
         dt = segment_times[i+1] - segment_times[i]
         Q = get_snap_cost_matrix(dt)
         cost += cp.quad_form(a_x, Q) + cp.quad_form(a_y, Q)
+
+        # Mittelpunkt im lokalen Zeitintervall
+        t_local = (segment_times[i+1] - segment_times[i]) / 2
+        T_mid = np.array([1, t_local, t_local**2, t_local**3, t_local**4, t_local**5])
+
+        # Evaluierter Punkt auf dem Polynomsegment
+        x_mid = a_x @ T_mid
+        y_mid = a_y @ T_mid
+
+        # Zielpunkt aus dem Pfad (nur der i-te Punkt, nicht i+1!)
+        target_x = 0.5 * (path[i][0] + path[i+1][0])
+        target_y = 0.5 * (path[i][1] + path[i+1][1])
+
+        # Quadratischer Abstand zum Zielpunkt
+        cost += psi * cp.sum_squares(x_mid - target_x)
+        cost += psi * cp.sum_squares(y_mid - target_y)
 
     # Startbedingungen
     T0 = np.array([1, 0, 0, 0, 0, 0])
@@ -90,6 +107,8 @@ def minimum_snap_trajectory(start_xy, goal_xy, v_start, v_end, num_segments=5):
     # Optimierung lösen
     prob = cp.Problem(cp.Minimize(cost), constraints)
     prob.solve()
+    print("Status:", prob.status)
+    print("Kostenwert:", prob.value)
 
     return coeffs_x, coeffs_y, segment_times
 
@@ -99,7 +118,7 @@ def evaluate_polynomial(coeffs, t):
     return sum(c * t**i for i, c in enumerate(coeffs))
 
 
-def solve_primal_step(z_traj, u_traj, segment_times, start_xy, goal_xy, v_start, v_end, rho):
+def solve_primal_step(z_traj, u_traj, segment_times, start_xy, goal_xy, v_start, v_end, rho, psi, path):
     import cvxpy as cp
 
     num_segments = len(segment_times) - 1
@@ -125,6 +144,21 @@ def solve_primal_step(z_traj, u_traj, segment_times, start_xy, goal_xy, v_start,
             target_x = z_traj[i][j] - u_traj[i][j]
             cost += (rho / 2) * cp.square(a_x @ T - target_x[0])
             cost += (rho / 2) * cp.square(a_y @ T - target_x[1])
+
+            t_local = (segment_times[i+1] - segment_times[i]) / 2
+            T_mid = np.array([1, t_local, t_local**2, t_local**3, t_local**4, t_local**5])
+
+            # Evaluierter Punkt auf dem Polynomsegment
+            x_mid = a_x @ T_mid
+            y_mid = a_y @ T_mid
+
+            # Zielpunkt aus dem Pfad (nur der i-te Punkt, nicht i+1!)
+            target_x = 0.5 * (path[i][0] + path[i+1][0])
+            target_y = 0.5 * (path[i][1] + path[i+1][1])
+
+            # Quadratischer Abstand zum Zielpunkt
+            cost += psi * cp.sum_squares(x_mid - target_x)
+            cost += psi * cp.sum_squares(y_mid - target_y)
 
     # Startbedingungen
     T0 = np.array([1, 0, 0, 0, 0, 0])

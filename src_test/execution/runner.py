@@ -1,7 +1,7 @@
 def run_admm_trajectory_optimization(config, DEBUG=False):    
     from input.trees2D import create_occupancy_grid, load_forest_from_file
     from pathfinder.AStar import astar
-    from utils.path_manipulation import simplify_path
+    from utils.path_manipulation import simplify_path, upsample_path
 
     from optimization.primal_step import minimum_snap_trajectory, evaluate_polynomial, solve_primal_step
     from optimization.projection_utils import project_segments_to_convex_regions
@@ -26,6 +26,8 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     use_path_guidance = config.get("use_path_guidance")
     lambda_path = config.get("lambda_path")
     num_segments = config.get("num_segments")
+    psi = config.get("psi")
+    psi_iterating = config.get("psi_iterating")
 
 
     # Baum- und Grid-Erzeugung
@@ -98,8 +100,10 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
     ax.plot(obstacles[:, 0], obstacles[:, 1], "o", color="green", label="Bäume")
 
+    upsampled_path = upsample_path(path_real, num_segments+1)
+
     # Generate trajectory coefficients
-    coeffs_x, coeffs_y, segment_times = minimum_snap_trajectory(start_xy, goal_xy, v_start, v_end, num_segments=num_segments)
+    coeffs_x, coeffs_y, segment_times = minimum_snap_trajectory(start_xy, goal_xy, v_start, v_end, upsampled_path, psi, num_segments=num_segments)
 
     projected_x, projected_y = project_segments_to_convex_regions(
             coeffs_x, coeffs_y, segment_times, A_list, b_list,
@@ -158,8 +162,11 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         else:
             z_traj_extrapolated = z_traj
 
+        psi = psi_iterating # Update psi for next iteration
+
+
         coeffs_x, coeffs_y = solve_primal_step(
-            z_traj_extrapolated, u_traj, segment_times, start_xy, goal_xy, v_start, v_end, rho
+            z_traj_extrapolated, u_traj, segment_times, start_xy, goal_xy, v_start, v_end, rho, psi, upsampled_path
         )
 
         # Neue x-Trajektorie berechnen (aus Polynomkoeffizienten)
