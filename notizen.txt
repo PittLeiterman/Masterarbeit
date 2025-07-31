@@ -1,4 +1,7 @@
 Momentum
 Regulierung durch A*
 Mehr Segmente
-min. ein Pfadsegment pro konvexe Fläche
+Literatur
+Neuer Weg: min. ein Pfadsegment pro konvexe Fläche (Paper)
+Beschleunigen: (Primal closed form solution QP)
+               (Convexe Sets für einfache Projektion)
