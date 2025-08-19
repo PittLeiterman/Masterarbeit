@@ -47,6 +47,9 @@ def project_segments_to_convex_regions(
     projected_segments_x = []
     projected_segments_y = []
 
+    segment_assignments = []
+    region_segment_count = [0] * len(A_list)
+
     for i in range(len(segment_times) - 1):
         a_x = coeffs_x[i].value
         a_y = coeffs_y[i].value
@@ -56,22 +59,20 @@ def project_segments_to_convex_regions(
         y_vals = evaluate_polynomial(a_y, t_vals)
         segment_points = np.stack([x_vals, y_vals], axis=1)
 
-        # Prüfe, ob das Segment vollständig in einer Region liegt
-        in_region = False
-        for A, b in zip(A_list, b_list):
+        # Check if segment lies fully inside any region
+        for j, (A, b) in enumerate(zip(A_list, b_list)):
             if is_inside_polyhedron(A, b, segment_points):
-                in_region = True
+                projected_segments_x.append(x_vals)
+                projected_segments_y.append(y_vals)
+                segment_assignments.append(j)
+                region_segment_count[j] += 1
                 break
-
-        if in_region:
-            # Keine Änderung
-            projected_segments_x.append(x_vals)
-            projected_segments_y.append(y_vals)
         else:
-            # Projektion notwendig
+            # Projection required
             best_proj_start = None
             best_proj_end = None
             closest_dist = float('inf')
+            best_region_idx = None
 
             start_point = segment_points[0]
             end_point = segment_points[-1]
@@ -83,7 +84,7 @@ def project_segments_to_convex_regions(
                 ref_start = start_point
                 ref_end = end_point
 
-            for A, b in zip(A_list, b_list):
+            for j, (A, b) in enumerate(zip(A_list, b_list)):
                 if use_path_guidance and path_reference is not None:
                     proj_start = project_point_to_polyhedron_with_reference(A, b, start_point, ref_start, lambd=lambda_path)
                     proj_end = project_point_to_polyhedron_with_reference(A, b, end_point, ref_end, lambd=lambda_path)
@@ -99,14 +100,61 @@ def project_segments_to_convex_regions(
                     closest_dist = dist
                     best_proj_start = proj_start
                     best_proj_end = proj_end
+                    best_region_idx = j
 
             if best_proj_start is not None and best_proj_end is not None:
                 x_vals_proj = np.linspace(best_proj_start[0], best_proj_end[0], len(t_vals))
                 y_vals_proj = np.linspace(best_proj_start[1], best_proj_end[1], len(t_vals))
                 projected_segments_x.append(x_vals_proj)
                 projected_segments_y.append(y_vals_proj)
+                segment_assignments.append(best_region_idx)
+                region_segment_count[best_region_idx] += 1
             else:
+                # fallback to unprojected segment
                 projected_segments_x.append(x_vals)
                 projected_segments_y.append(y_vals)
+                segment_assignments.append(-1)  # Mark as unassigned
+
+    # Postprocess: ensure each region has at least one assigned segment
+    for uncovered_idx, count in enumerate(region_segment_count):
+        print("Region:", uncovered_idx, "Segmente",count)
+        if count == 0:
+            # Find a donor region with >1 segments
+            donor_idx = None
+            for i, c in enumerate(region_segment_count):
+                if c > 1:
+                    donor_idx = i
+                    break
+            if donor_idx is None:
+                print(f"WARNING: Could not find donor for region {uncovered_idx}")
+                continue
+
+            # Pick one segment from donor region to reassign
+            # Find the last segment assigned to the donor region
+            donor_segment_indices = [i for i, idx in enumerate(segment_assignments) if idx == donor_idx]
+            if not donor_segment_indices:
+                print(f"WARNING: Donor region {donor_idx} has no assigned segments.")
+                continue  # fallback safety, should never happen
+
+            s_idx = donor_segment_indices[-1]  # last assigned segment
+
+            start_point = np.array([projected_segments_x[s_idx][0], projected_segments_y[s_idx][0]])
+            end_point = np.array([projected_segments_x[s_idx][-1], projected_segments_y[s_idx][-1]])
+
+            proj_start = project_point_to_polyhedron(A_list[uncovered_idx], b_list[uncovered_idx], start_point)
+            proj_end = project_point_to_polyhedron(A_list[uncovered_idx], b_list[uncovered_idx], end_point)
+
+            new_x = np.linspace(proj_start[0], proj_end[0], len(projected_segments_x[s_idx]))
+            new_y = np.linspace(proj_start[1], proj_end[1], len(projected_segments_y[s_idx]))
+
+            projected_segments_x[s_idx] = new_x
+            projected_segments_y[s_idx] = new_y
+
+            # Update assignments
+            segment_assignments[s_idx] = uncovered_idx
+            region_segment_count[uncovered_idx] += 1
+            region_segment_count[donor_idx] -= 1
+
 
     return projected_segments_x, projected_segments_y
+

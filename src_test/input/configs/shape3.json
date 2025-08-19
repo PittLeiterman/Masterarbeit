@@ -7,12 +7,12 @@
     "rho": 300000.0,
     "max_iters": 200,
     "eps": 0.2,
-    "beta": 0.05,
+    "beta": 0.00,
     "v_start": [0.0, 0.0],
     "v_end": [0.0, 0.0],
-    "use_path_guidance": false,
-    "lambda_path": 0.5,
+    "use_path_guidance": true,
+    "lambda_path": 1000.0,
     "num_segments": 30,
-    "psi": 1e6,
-    "psi_iterating": 100000
+    "psi": 0,
+    "psi_iterating": 0
 }
