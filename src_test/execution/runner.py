@@ -3,13 +3,132 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     from pathfinder.AStar import astar
     from utils.path_manipulation import simplify_path, upsample_path
 
-    from optimization.primal_step import minimum_snap_trajectory, evaluate_polynomial, solve_primal_step
+    from optimization.primal_step import minimum_snap_trajectory, evaluate_polynomial, get_snap_cost_matrix
     from optimization.projection_utils import project_segments_to_convex_regions
 
     import pydecomp as pdc
     import numpy as np
     import matplotlib.pyplot as plt
     import matplotlib.cm as cm
+
+    import numpy as np
+    import cvxpy as cp
+
+    def precompute_bases(segment_times, n_samples_per_seg):
+        """Precompute all time-basis rows, the design matrices Phi, mid rows, and snap Qs."""
+        num_segments = len(segment_times) - 1
+        Phi_list, Tmid_list, bounds, Q_list = [], [], [], []
+
+        for i in range(num_segments):
+            t0, t1 = segment_times[i], segment_times[i+1]
+            dt = t1 - t0
+
+            # Snap matrix (yours)
+            Q_list.append(get_snap_cost_matrix(dt))
+
+            # Uniform sample times inside [0, dt] with the same count you already use
+            t_vals = np.linspace(0, dt, n_samples_per_seg)
+            Phi = np.vstack([t_vals**k for k in range(6)]).T  # (m, 6)
+            Phi_list.append(Phi)
+
+            # Midpoint basis row
+            tm = 0.5 * dt
+            Tmid_list.append(np.array([1, tm, tm**2, tm**3, tm**4, tm**5]))
+
+            # Boundary rows
+            T_end     = np.array([1, dt, dt**2, dt**3, dt**4, dt**5])
+            T_dot_end = np.array([0, 1, 2*dt, 3*dt**2, 4*dt**3, 5*dt**4])
+            T_dd_end  = np.array([0, 0, 2, 6*dt, 12*dt**2, 20*dt**3])
+            T_ddd_end = np.array([0, 0, 0, 6, 24*dt, 60*dt**2])
+
+            T_start   = np.array([1, 0, 0, 0, 0, 0])
+            T_dot0    = np.array([0, 1, 0, 0, 0, 0])
+            T_ddot0   = np.array([0, 0, 2, 0, 0, 0])
+            T_dddot0  = np.array([0, 0, 0, 6, 0, 0])
+
+            bounds.append(dict(
+                T_end=T_end, T_dot_end=T_dot_end, T_dd_end=T_dd_end, T_ddd_end=T_ddd_end,
+                T_start=T_start, T_dot0=T_dot0, T_ddot0=T_ddot0, T_dddot0=T_dddot0
+            ))
+
+        return Phi_list, Tmid_list, bounds, Q_list
+
+
+    def build_problem(segment_times, start_xy, goal_xy, v_start, v_end,
+                    path_mid_targets,  # shape (num_segments, 2) midpoints of reference path
+                    Phi_list, Tmid_list, bounds, Q_list):
+        """Build the CVXPY problem once. Expose Parameters for (z - u), rho, psi."""
+        num_segments = len(segment_times) - 1
+        m = Phi_list[0].shape[0]
+
+        # Variables per segment (6th-order poly in x and y)
+        ax = [cp.Variable(6) for _ in range(num_segments)]
+        ay = [cp.Variable(6) for _ in range(num_segments)]
+
+        # Parameters that change each ADMM iteration
+        rho = cp.Parameter(nonneg=True, value=1.0)
+        psi = cp.Parameter(nonneg=True, value=1.0)
+        Zu_x = [cp.Parameter(m, value=np.zeros(m)) for _ in range(num_segments)]
+        Zu_y = [cp.Parameter(m, value=np.zeros(m)) for _ in range(num_segments)]
+
+        # Cost
+        cost_terms = []
+        for i in range(num_segments):
+            Q = Q_list[i]
+            Phi = Phi_list[i]
+            Tmid = Tmid_list[i]
+            tx_i, ty_i = path_mid_targets[i]
+
+            # Snap
+            cost_terms += [cp.quad_form(ax[i], Q) + cp.quad_form(ay[i], Q)]
+            # ADMM tracking of z - u
+            cost_terms += [(rho/2) * cp.sum_squares(Phi @ ax[i] - Zu_x[i])]
+            cost_terms += [(rho/2) * cp.sum_squares(Phi @ ay[i] - Zu_y[i])]
+            # Path guidance at midpoint
+            cost_terms += [psi * cp.sum_squares(Tmid @ ax[i] - tx_i)]
+            cost_terms += [psi * cp.sum_squares(Tmid @ ay[i] - ty_i)]
+
+        constraints = []
+        # Start boundary
+        T0    = np.array([1, 0, 0, 0, 0, 0])
+        T0dot = np.array([0, 1, 0, 0, 0, 0])
+        constraints += [
+            ax[0] @ T0 == start_xy[0],
+            ay[0] @ T0 == start_xy[1],
+            ax[0] @ T0dot == v_start[0],
+            ay[0] @ T0dot == v_start[1],
+        ]
+
+        # End boundary
+        dt_end = segment_times[-1] - segment_times[-2]
+        T1    = np.array([1, dt_end, dt_end**2, dt_end**3, dt_end**4, dt_end**5])
+        T1dot = np.array([0, 1, 2*dt_end, 3*dt_end**2, 4*dt_end**3, 5*dt_end**4])
+        constraints += [
+            ax[-1] @ T1 == goal_xy[0],
+            ay[-1] @ T1 == goal_xy[1],
+            ax[-1] @ T1dot == v_end[0],
+            ay[-1] @ T1dot == v_end[1],
+        ]
+
+        # C^3 continuity
+        for i in range(num_segments - 1):
+            b = bounds[i]
+            constraints += [
+                ax[i] @ b["T_end"]     == ax[i+1] @ b["T_start"],
+                ay[i] @ b["T_end"]     == ay[i+1] @ b["T_start"],
+                ax[i] @ b["T_dot_end"] == ax[i+1] @ b["T_dot0"],
+                ay[i] @ b["T_dot_end"] == ay[i+1] @ b["T_dot0"],
+                ax[i] @ b["T_dd_end"]  == ax[i+1] @ b["T_ddot0"],
+                ay[i] @ b["T_dd_end"]  == ay[i+1] @ b["T_ddot0"],
+                ax[i] @ b["T_ddd_end"] == ax[i+1] @ b["T_dddot0"],
+                ay[i] @ b["T_ddd_end"] == ay[i+1] @ b["T_dddot0"],
+            ]
+
+        prob = cp.Problem(cp.Minimize(cp.sum(cost_terms)), constraints)
+
+        # Expose handles you’ll update per iteration
+        return dict(prob=prob, rho=rho, psi=psi, Zu_x=Zu_x, Zu_y=Zu_y, ax=ax, ay=ay, Phi_list=Phi_list)
+
 
     # Parameter
     area_size = tuple(config["area_size"])
@@ -105,6 +224,27 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     # Generate trajectory coefficients
     coeffs_x, coeffs_y, segment_times = minimum_snap_trajectory(start_xy, goal_xy, v_start, v_end, upsampled_path, psi, num_segments=num_segments)
 
+    # === NEW: precompute constant matrices and build QP once ===
+    Phi_list, Tmid_list, bounds, Q_list = precompute_bases(segment_times, n_samples_per_seg=num_segments)
+
+    # Constant midpoint targets from the *upsampled* path (matches num_segments)
+    mid_targets = []
+    for i in range(len(segment_times) - 1):
+        tx = 0.5 * (upsampled_path[i, 0] + upsampled_path[i+1, 0])
+        ty = 0.5 * (upsampled_path[i, 1] + upsampled_path[i+1, 1])
+        mid_targets.append((tx, ty))
+    mid_targets = np.array(mid_targets)
+
+
+    QP = build_problem(
+        segment_times=segment_times,
+        start_xy=start_xy, goal_xy=goal_xy,
+        v_start=v_start, v_end=v_end,
+        path_mid_targets=mid_targets,
+        Phi_list=Phi_list, Tmid_list=Tmid_list, bounds=bounds, Q_list=Q_list
+    )
+
+
     projected_x, projected_y = project_segments_to_convex_regions(
             coeffs_x, coeffs_y, segment_times, A_list, b_list,
             path_reference=path_real,
@@ -165,9 +305,23 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         psi = psi_iterating # Update psi for next iteration
 
 
-        coeffs_x, coeffs_y = solve_primal_step(
-            z_traj_extrapolated, u_traj, segment_times, start_xy, goal_xy, v_start, v_end, rho, psi, upsampled_path
-        )
+        # === NEW: update Parameters and solve without rebuilding ===
+        QP["rho"].value = rho
+        QP["psi"].value = psi  # or psi_iterating if you update it each iter
+
+        for i in range(len(segment_times) - 1):
+            # z - u targets per sample (must match n_samples_per_seg)
+            Zu = z_traj_extrapolated[i] - u_traj[i]          # shape (m, 2)
+            QP["Zu_x"][i].value = Zu[:, 0]
+            QP["Zu_y"][i].value = Zu[:, 1]
+
+        # Reuse factorization; OSQP is great for this pattern
+        QP["prob"].solve(solver=cp.OSQP, warm_start=True, verbose=False)
+
+        # Grab the new polynomial coefficients
+        coeffs_x = QP["ax"]
+        coeffs_y = QP["ay"]
+
 
         # Neue x-Trajektorie berechnen (aus Polynomkoeffizienten)
         x_traj = []
