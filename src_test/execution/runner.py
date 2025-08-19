@@ -14,6 +14,8 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     import numpy as np
     import cvxpy as cp
 
+    import time
+
     def precompute_bases(segment_times, n_samples_per_seg):
         """Precompute all time-basis rows, the design matrices Phi, mid rows, and snap Qs."""
         num_segments = len(segment_times) - 1
@@ -292,6 +294,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
     for k in range(max_iters):
         print(f"--- Iteration {k+1} ---")
+        start_iter = time.perf_counter()
         if k == 0:
             z_traj_prev = z_traj.copy()
         if k > 0:
@@ -321,7 +324,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         # Grab the new polynomial coefficients
         coeffs_x = QP["ax"]
         coeffs_y = QP["ay"]
-
+        end_iter = time.perf_counter()
 
         # Neue x-Trajektorie berechnen (aus Polynomkoeffizienten)
         x_traj = []
@@ -397,6 +400,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         ax.set_aspect('equal')
         ax.grid(True)
         ax.legend()
+        print(f"Iter {k+1} Dauer: {end_iter - start_iter:.3f} Sekunden")
         plt.pause(0.1)
         plt.clf()
 
