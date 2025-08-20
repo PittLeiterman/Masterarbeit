@@ -372,6 +372,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
             lambda_path=lambda_path,
             n_samples=num_segments
         )
+
         z_traj = [np.column_stack((x, y)) for x, y in zip(projected_x, projected_y)]
 
         # DUAL UPDATE
@@ -396,13 +397,6 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
                 ax.plot(x_vals, y_vals, 'r-', linewidth=2, label=label)
                 already_labeled.add("projiziert")
 
-            for idx, (x_vals, y_vals) in enumerate(zip(projected_x, projected_y)):
-                if any(r[0] == idx for r in reassigned):
-                    ax.plot(
-                        x_vals, y_vals,
-                        color="magenta", linewidth=4, linestyle="--", marker="o", markersize=8,
-                        label="reassigned" if "reassigned" not in ax.get_legend_handles_labels()[1] else ""
-                    )
 
             # Aktuelle Trajektorie (bunt)
             for segment, color in zip(x_traj, colors):
@@ -428,6 +422,15 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
             label = "projiziert" if "projiziert" not in already_labeled else ""
             ax.plot(x_vals, y_vals, 'r-', linewidth=2, label=label)
             already_labeled.add("projiziert")
+
+        for idx, (x_vals, y_vals) in enumerate(zip(projected_x, projected_y)):
+                if any(r[0] == idx for r in reassigned):
+                    ax.plot(
+                        x_vals, y_vals,
+                        color="magenta", linewidth=4, linestyle="--", marker="o", markersize=8,
+                        label="reassigned" if "reassigned" not in ax.get_legend_handles_labels()[1] else ""
+                    )
+                    print("should plot")
 
         # Aktuelle Trajektorie (bunt)
         for segment, color in zip(x_traj, colors):
