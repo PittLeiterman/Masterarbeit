@@ -60,7 +60,7 @@ def minimum_snap_trajectory(start_xy, goal_xy, v_start, v_end, path, psi, num_se
         coeffs_x[0] @ T0 == start_xy[0],
         coeffs_y[0] @ T0 == start_xy[1],
         coeffs_x[0] @ T0_dot == v_start[0],
-        coeffs_y[0] @ T0_dot == v_start[1]
+        coeffs_y[0] @ T0_dot == v_start[1],
     ]
 
     # Zielbedingungen

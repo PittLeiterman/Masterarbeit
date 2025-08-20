@@ -168,6 +168,24 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     # Pfad prüfen
     if path is None or len(path) == 0:
         print("Kein Pfad gefunden!")
+        # Plot Setup
+        fig, ax = plt.subplots()
+        ax.set_aspect('equal')
+        ax.set_title("Hindernisse (Debug-Ansicht ohne Pfad)")
+        ax.set_xlim(0, area_size[0])
+        ax.set_ylim(0, area_size[1])
+        ax.grid(True)
+
+        # Hindernisse (Wald)
+        forest_np = np.array(obstacles)
+        ax.plot(forest_np[:, 0], forest_np[:, 1], 'go', markersize=3, label='Bäume')
+
+        # Start & Ziel
+        ax.plot(start_xy[0], start_xy[1], 'bo', markersize=6, label='Start')
+        ax.plot(goal_xy[0], goal_xy[1], 'ro', markersize=6, label='Ziel')
+
+        ax.legend()
+        plt.show()
         exit()
 
     print(f"Pfad gefunden")
@@ -247,7 +265,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     )
 
 
-    projected_x, projected_y = project_segments_to_convex_regions(
+    projected_x, projected_y, reassigned = project_segments_to_convex_regions(
             coeffs_x, coeffs_y, segment_times, A_list, b_list,
             path_reference=path_real,
             use_path_guidance=use_path_guidance,
@@ -271,8 +289,19 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         dist = sum(np.hypot(np.diff(x_vals), np.diff(y_vals)))
         segment_lengths.append(dist)
 
+    # First draw all in red
     for x_vals, y_vals in zip(projected_x, projected_y):
-        ax.plot(x_vals, y_vals, 'r-', linewidth=2, label="projiziert" if 'projiziert' not in ax.get_legend_handles_labels()[1] else "")
+        ax.plot(x_vals, y_vals, 'r-', linewidth=2, 
+                label="projiziert" if "projiziert" not in ax.get_legend_handles_labels()[1] else "")
+
+    # Then overwrite reassigned ones in magenta
+    for idx, (x_vals, y_vals) in enumerate(zip(projected_x, projected_y)):
+        if any(r[0] == idx for r in reassigned):
+            ax.plot(
+                x_vals, y_vals,
+                color="magenta", linewidth=4, linestyle="--", marker="o", markersize=8,
+                label="reassigned" if "reassigned" not in ax.get_legend_handles_labels()[1] else ""
+            )
 
     plt.show()
 
@@ -336,7 +365,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
             y_vals = [evaluate_polynomial(a_y, t) for t in t_vals]
             x_traj.append(np.column_stack((x_vals, y_vals)))
 
-        projected_x, projected_y = project_segments_to_convex_regions(
+        projected_x, projected_y, reassigned = project_segments_to_convex_regions(
             coeffs_x, coeffs_y, segment_times, A_list, b_list,
             path_reference=path_real,
             use_path_guidance=use_path_guidance,
@@ -366,6 +395,14 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
                 label = "projiziert" if "projiziert" not in already_labeled else ""
                 ax.plot(x_vals, y_vals, 'r-', linewidth=2, label=label)
                 already_labeled.add("projiziert")
+
+            for idx, (x_vals, y_vals) in enumerate(zip(projected_x, projected_y)):
+                if any(r[0] == idx for r in reassigned):
+                    ax.plot(
+                        x_vals, y_vals,
+                        color="magenta", linewidth=4, linestyle="--", marker="o", markersize=8,
+                        label="reassigned" if "reassigned" not in ax.get_legend_handles_labels()[1] else ""
+                    )
 
             # Aktuelle Trajektorie (bunt)
             for segment, color in zip(x_traj, colors):

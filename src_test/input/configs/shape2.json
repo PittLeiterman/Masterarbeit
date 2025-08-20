@@ -13,6 +13,6 @@
     "use_path_guidance": false,
     "lambda_path": 0.5,
     "num_segments": 30,
-    "psi": 10000,
-    "psi_iterating": 20
+    "psi": 1000,
+    "psi_iterating": 1000
 }

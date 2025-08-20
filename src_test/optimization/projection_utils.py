@@ -47,6 +47,8 @@ def project_segments_to_convex_regions(
     projected_segments_x = []
     projected_segments_y = []
 
+    reassigned_segments = []
+
     segment_assignments = []
     region_segment_count = [0] * len(A_list)
 
@@ -79,18 +81,22 @@ def project_segments_to_convex_regions(
 
             if use_path_guidance and path_reference is not None:
                 ref_start = find_closest_point_on_path(path_reference, start_point)
-                ref_end = find_closest_point_on_path(path_reference, end_point)
+                ref_end   = find_closest_point_on_path(path_reference, end_point)
             else:
                 ref_start = start_point
-                ref_end = end_point
+                ref_end   = end_point
 
             for j, (A, b) in enumerate(zip(A_list, b_list)):
                 if use_path_guidance and path_reference is not None:
-                    proj_start = project_point_to_polyhedron_with_reference(A, b, start_point, ref_start, lambd=lambda_path)
-                    proj_end = project_point_to_polyhedron_with_reference(A, b, end_point, ref_end, lambd=lambda_path)
+                    proj_start = project_point_to_polyhedron_with_reference(
+                        A, b, start_point, ref_start, lambd=lambda_path
+                    )
+                    proj_end   = project_point_to_polyhedron_with_reference(
+                        A, b, end_point, ref_end, lambd=lambda_path
+                    )
                 else:
                     proj_start = project_point_to_polyhedron(A, b, start_point)
-                    proj_end = project_point_to_polyhedron(A, b, end_point)
+                    proj_end   = project_point_to_polyhedron(A, b, end_point)
 
                 proj_mid = (proj_start + proj_end) / 2
                 orig_mid = (start_point + end_point) / 2
@@ -117,32 +123,49 @@ def project_segments_to_convex_regions(
 
     # Postprocess: ensure each region has at least one assigned segment
     for uncovered_idx, count in enumerate(region_segment_count):
-        print("Region:", uncovered_idx, "Segmente",count)
+        print("Region:", uncovered_idx, "Segmente", count)
         if count == 0:
-            # Find a donor region with >1 segments
-            donor_idx = None
-            for i, c in enumerate(region_segment_count):
-                if c > 1:
-                    donor_idx = i
-                    break
-            if donor_idx is None:
-                print(f"WARNING: Could not find donor for region {uncovered_idx}")
+            lower_idx = uncovered_idx - 1 if uncovered_idx - 1 >= 0 else None
+            upper_idx = uncovered_idx + 1 if uncovered_idx + 1 < len(A_list) else None
+
+            candidates = []
+            for neighbour in [lower_idx, upper_idx]:
+                if neighbour is None:
+                    continue
+
+                seg_indices = [i for i, idx in enumerate(segment_assignments) if idx == neighbour]
+                if not seg_indices:
+                    continue
+
+                # order rule: take last seg from lower neighbour, first seg from upper neighbour
+                if neighbour < uncovered_idx:
+                    donor_seg = max(seg_indices)
+                else:
+                    donor_seg = min(seg_indices)
+
+                # projection distance
+                start_point = np.array([projected_segments_x[donor_seg][0], projected_segments_y[donor_seg][0]])
+                end_point   = np.array([projected_segments_x[donor_seg][-1], projected_segments_y[donor_seg][-1]])
+                proj_start  = project_point_to_polyhedron(A_list[uncovered_idx], b_list[uncovered_idx], start_point)
+                proj_end    = project_point_to_polyhedron(A_list[uncovered_idx], b_list[uncovered_idx], end_point)
+                dist        = np.linalg.norm(((proj_start + proj_end) / 2) - ((start_point + end_point) / 2))
+
+                candidates.append((dist, neighbour, donor_seg, proj_start, proj_end))
+
+            if not candidates:
+                print(f"WARNING: Could not find neighbour donor for region {uncovered_idx}")
                 continue
 
-            # Pick one segment from donor region to reassign
-            # Find the last segment assigned to the donor region
-            donor_segment_indices = [i for i, idx in enumerate(segment_assignments) if idx == donor_idx]
-            if not donor_segment_indices:
-                print(f"WARNING: Donor region {donor_idx} has no assigned segments.")
-                continue  # fallback safety, should never happen
+            # pick best candidate
+            candidates.sort(key=lambda c: c[0])
+            _, donor_idx, s_idx, proj_start, proj_end = candidates[0]
 
-            s_idx = donor_segment_indices[-1]  # last assigned segment
 
             start_point = np.array([projected_segments_x[s_idx][0], projected_segments_y[s_idx][0]])
-            end_point = np.array([projected_segments_x[s_idx][-1], projected_segments_y[s_idx][-1]])
+            end_point   = np.array([projected_segments_x[s_idx][-1], projected_segments_y[s_idx][-1]])
 
             proj_start = project_point_to_polyhedron(A_list[uncovered_idx], b_list[uncovered_idx], start_point)
-            proj_end = project_point_to_polyhedron(A_list[uncovered_idx], b_list[uncovered_idx], end_point)
+            proj_end   = project_point_to_polyhedron(A_list[uncovered_idx], b_list[uncovered_idx], end_point)
 
             new_x = np.linspace(proj_start[0], proj_end[0], len(projected_segments_x[s_idx]))
             new_y = np.linspace(proj_start[1], proj_end[1], len(projected_segments_y[s_idx]))
@@ -150,11 +173,16 @@ def project_segments_to_convex_regions(
             projected_segments_x[s_idx] = new_x
             projected_segments_y[s_idx] = new_y
 
-            # Update assignments
-            segment_assignments[s_idx] = uncovered_idx
+            print(f"Reassigning segment {s_idx} from region {donor_idx} → region {uncovered_idx}")
+            reassigned_segments.append((s_idx, donor_idx, uncovered_idx))
+
             region_segment_count[uncovered_idx] += 1
             region_segment_count[donor_idx] -= 1
 
+    print("\nUpdated region assignments after projection fix:")
+    for idx, count in enumerate(region_segment_count):
+        print(f"Region {idx}: Segmente {count}")
 
-    return projected_segments_x, projected_segments_y
+    return projected_segments_x, projected_segments_y, reassigned_segments
+
 
