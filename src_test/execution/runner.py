@@ -13,6 +13,8 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
     import numpy as np
     import cvxpy as cp
+    from scipy.sparse import block_diag as sp_block_diag, csr_matrix
+
 
     import time
 
@@ -57,98 +59,124 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
 
     def build_problem(segment_times, start_xy, goal_xy, v_start, v_end,
-                    path_mid_targets,  # shape (num_segments, 2) midpoints of reference path
-                    Phi_list, Tmid_list, bounds, Q_list):
-        """Build the CVXPY problem once. Expose Parameters for (z - u), rho, psi."""
+                  path_mid_targets,  # shape (num_segments, 2)
+                  Phi_list, Tmid_list, bounds, Q_list):
+        """
+        Faster, stacked CVXPY model:
+        - single ax, ay (shape 6*num_segments)
+        - single Zu_x, Zu_y Parameters (length num_segments*m)
+        - block-diagonal Φ, Q, Tmid
+        """
         num_segments = len(segment_times) - 1
         m = Phi_list[0].shape[0]
 
-        # Variables per segment (6th-order poly in x and y)
-        ax = [cp.Variable(6) for _ in range(num_segments)]
-        ay = [cp.Variable(6) for _ in range(num_segments)]
+        # --- Block-diagonal bases (sparse) ---
+        Phi_blk   = sp_block_diag([csr_matrix(P) for P in Phi_list], format="csr")     # ((num_segments*m) x (6*num_segments))
+        Q_blk     = sp_block_diag([csr_matrix(Q) for Q in Q_list], format="csr")       # ((6*num_segments) x (6*num_segments))
+        Tmid_blk  = sp_block_diag([csr_matrix(T.reshape(1,-1)) for T in Tmid_list], format="csr")  # (num_segments x (6*num_segments))
 
-        # Parameters that change each ADMM iteration
+        # --- Decision vars (stacked) ---
+        ax = cp.Variable(6 * num_segments)
+        ay = cp.Variable(6 * num_segments)
+
+        # --- Parameters that change per ADMM iter ---
         rho = cp.Parameter(nonneg=True, value=1.0)
         psi = cp.Parameter(nonneg=True, value=1.0)
-        Zu_x = [cp.Parameter(m, value=np.zeros(m)) for _ in range(num_segments)]
-        Zu_y = [cp.Parameter(m, value=np.zeros(m)) for _ in range(num_segments)]
+        Zu_x = cp.Parameter(num_segments * m, value=np.zeros(num_segments * m))
+        Zu_y = cp.Parameter(num_segments * m, value=np.zeros(num_segments * m))
 
-        # Cost
-        cost_terms = []
-        for i in range(num_segments):
-            Q = Q_list[i]
-            Phi = Phi_list[i]
-            Tmid = Tmid_list[i]
-            tx_i, ty_i = path_mid_targets[i]
+        # --- Path guidance targets (constants) ---
+        tx = path_mid_targets[:, 0]
+        ty = path_mid_targets[:, 1]
 
-            # Snap
-            cost_terms += [cp.quad_form(ax[i], Q) + cp.quad_form(ay[i], Q)]
-            # ADMM tracking of z - u
-            cost_terms += [(rho/2) * cp.sum_squares(Phi @ ax[i] - Zu_x[i])]
-            cost_terms += [(rho/2) * cp.sum_squares(Phi @ ay[i] - Zu_y[i])]
-            # Path guidance at midpoint
-            cost_terms += [psi * cp.sum_squares(Tmid @ ax[i] - tx_i)]
-            cost_terms += [psi * cp.sum_squares(Tmid @ ay[i] - ty_i)]
+        # --- Cost: snap + ADMM tracking + midpoint guidance ---
+        cost = 0
+        cost += cp.quad_form(ax, Q_blk) + cp.quad_form(ay, Q_blk)                          # snap
+        cost += (rho/2) * cp.sum_squares(Phi_blk @ ax - Zu_x)                               # ADMM track x
+        cost += (rho/2) * cp.sum_squares(Phi_blk @ ay - Zu_y)                               # ADMM track y
+        cost += psi * cp.sum_squares(Tmid_blk @ ax - tx) + psi * cp.sum_squares(Tmid_blk @ ay - ty)
 
+        # --- Constraints: start/end + C^3 continuity (slice-based, no tiny params) ---
         constraints = []
-        # Start boundary
+
+        # Helper to slice the i-th segment's 6 coeffs (Python slicing works in CVXPY)
+        def seg(a, i):
+            s = slice(6*i, 6*(i+1))
+            return a[s]
+
+        # Start boundary (segment 0, t=0)
         T0    = np.array([1, 0, 0, 0, 0, 0])
         T0dot = np.array([0, 1, 0, 0, 0, 0])
         constraints += [
-            ax[0] @ T0 == start_xy[0],
-            ay[0] @ T0 == start_xy[1],
-            ax[0] @ T0dot == v_start[0],
-            ay[0] @ T0dot == v_start[1],
+            seg(ax, 0) @ T0    == start_xy[0],
+            seg(ay, 0) @ T0    == start_xy[1],
+            seg(ax, 0) @ T0dot == v_start[0],
+            seg(ay, 0) @ T0dot == v_start[1],
         ]
 
-        # End boundary
+        # End boundary (last segment, t = dt_end)
         dt_end = segment_times[-1] - segment_times[-2]
         T1    = np.array([1, dt_end, dt_end**2, dt_end**3, dt_end**4, dt_end**5])
         T1dot = np.array([0, 1, 2*dt_end, 3*dt_end**2, 4*dt_end**3, 5*dt_end**4])
         constraints += [
-            ax[-1] @ T1 == goal_xy[0],
-            ay[-1] @ T1 == goal_xy[1],
-            ax[-1] @ T1dot == v_end[0],
-            ay[-1] @ T1dot == v_end[1],
+            seg(ax, num_segments-1) @ T1    == goal_xy[0],
+            seg(ay, num_segments-1) @ T1    == goal_xy[1],
+            seg(ax, num_segments-1) @ T1dot == v_end[0],
+            seg(ay, num_segments-1) @ T1dot == v_end[1],
         ]
 
-        # C^3 continuity
+        # C^3 continuity across segments
         for i in range(num_segments - 1):
             b = bounds[i]
             constraints += [
-                ax[i] @ b["T_end"]     == ax[i+1] @ b["T_start"],
-                ay[i] @ b["T_end"]     == ay[i+1] @ b["T_start"],
-                ax[i] @ b["T_dot_end"] == ax[i+1] @ b["T_dot0"],
-                ay[i] @ b["T_dot_end"] == ay[i+1] @ b["T_dot0"],
-                ax[i] @ b["T_dd_end"]  == ax[i+1] @ b["T_ddot0"],
-                ay[i] @ b["T_dd_end"]  == ay[i+1] @ b["T_ddot0"],
-                ax[i] @ b["T_ddd_end"] == ax[i+1] @ b["T_dddot0"],
-                ay[i] @ b["T_ddd_end"] == ay[i+1] @ b["T_dddot0"],
+                seg(ax, i) @ b["T_end"]     == seg(ax, i+1) @ b["T_start"],
+                seg(ay, i) @ b["T_end"]     == seg(ay, i+1) @ b["T_start"],
+                seg(ax, i) @ b["T_dot_end"] == seg(ax, i+1) @ b["T_dot0"],
+                seg(ay, i) @ b["T_dot_end"] == seg(ay, i+1) @ b["T_dot0"],
+                seg(ax, i) @ b["T_dd_end"]  == seg(ax, i+1) @ b["T_ddot0"],
+                seg(ay, i) @ b["T_dd_end"]  == seg(ay, i+1) @ b["T_ddot0"],
+                seg(ax, i) @ b["T_ddd_end"] == seg(ax, i+1) @ b["T_dddot0"],
+                seg(ay, i) @ b["T_ddd_end"] == seg(ay, i+1) @ b["T_dddot0"],
             ]
 
-        prob = cp.Problem(cp.Minimize(cp.sum(cost_terms)), constraints)
+        prob = cp.Problem(cp.Minimize(cost), constraints)
 
-        # Expose handles you’ll update per iteration
-        return dict(prob=prob, rho=rho, psi=psi, Zu_x=Zu_x, Zu_y=Zu_y, ax=ax, ay=ay, Phi_list=Phi_list)
+        # Handles used in the loop
+        return dict(
+            prob=prob, rho=rho, psi=psi,
+            Zu_x=Zu_x, Zu_y=Zu_y,
+            ax_s=ax, ay_s=ay,
+            Phi_blk=Phi_blk,  # might be handy elsewhere
+            m=m, num_segments=num_segments
+        )
 
 
-    def admm_residuals(Phi_list, coeffs_x, coeffs_y, z_traj, z_traj_prev, rho):
-        """Primal r = Phi a - z (in sample space); Dual s = rho * Phi^T (z - z_prev) (in coeff space)."""
-        r_inf = 0.0
-        s_inf = 0.0
-        for i, Phi in enumerate(Phi_list):
-            ax_i = coeffs_x[i].value
-            ay_i = coeffs_y[i].value
-            # primal residuals at samples
-            rx = Phi @ ax_i - z_traj[i][:, 0]
-            ry = Phi @ ay_i - z_traj[i][:, 1]
-            r_inf = max(r_inf, np.linalg.norm(rx, np.inf), np.linalg.norm(ry, np.inf))
-            # dual residuals mapped back to coeff space
-            dz = z_traj[i] - z_traj_prev[i]
-            sx = rho * (Phi.T @ dz[:, 0])
-            sy = rho * (Phi.T @ dz[:, 1])
-            s_inf = max(s_inf, np.linalg.norm(sx, np.inf), np.linalg.norm(sy, np.inf))
+
+    def admm_residuals_stacked(Phi_blk, ax_s, ay_s, z_traj, z_traj_prev, rho):
+        """
+        r = Phi a - z  (computed for x and y, take max-inf norm)
+        s = rho * Phi^T (z - z_prev)
+        Uses stacked (block-diagonal) Phi and stacked vars.
+        """
+        import numpy as np
+
+        # Stack current and previous z's: shape ((num_segments*m) x 2)
+        Z  = np.vstack(z_traj)
+        Zp = np.vstack(z_traj_prev)
+
+        # Primal residuals
+        rx = Phi_blk @ ax_s.value - Z[:, 0]
+        ry = Phi_blk @ ay_s.value - Z[:, 1]
+        r_inf = max(np.linalg.norm(rx, np.inf), np.linalg.norm(ry, np.inf))
+
+        # Dual residuals
+        dz = Z - Zp
+        sx = rho * (Phi_blk.T @ dz[:, 0])
+        sy = rho * (Phi_blk.T @ dz[:, 1])
+        s_inf = max(np.linalg.norm(sx, np.inf), np.linalg.norm(sy, np.inf))
+
         return r_inf, s_inf
+
 
     def update_rho(rho, r_inf, s_inf,
                 tau_inc=2.0, kappa_inc=1.0, factor_inc=10.0,
@@ -373,28 +401,46 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         print(f"--- Iteration {k+1} ---")
         start_iter = time.perf_counter()
 
+        # 1) Extrapolation (vectorized)
         if k == 0:
             z_traj_prev = [z.copy() for z in z_traj]
 
-        
         if k > 0:
-            z_traj_extrapolated = [z + beta * (z - zp) for z, zp in zip(z_traj, z_traj_prev)]
+            # stack once, operate once
+            Z   = np.vstack(z_traj)           # ((num_segments*m) x 2)
+            Zp  = np.vstack(z_traj_prev)
+            Zex = Z + beta * (Z - Zp)
         else:
-            z_traj_extrapolated = z_traj
+            Zex = np.vstack(z_traj)
 
-        psi = psi_iterating
+        U   = np.vstack(u_traj)               # same stacked shape
+        ZU  = Zex - U                         
+
+        # 2) Single-parameter updates + scalar params
         QP["rho"].value = rho
-        QP["psi"].value = psi
+        QP["psi"].value = psi_iterating
+        QP["Zu_x"].value = ZU[:, 0].ravel()
+        QP["Zu_y"].value = ZU[:, 1].ravel()
 
-        for i in range(len(segment_times) - 1):
-            Zu = z_traj_extrapolated[i] - u_traj[i]      # shape (m,2)
-            QP["Zu_x"][i].value = Zu[:, 0]
-            QP["Zu_y"][i].value = Zu[:, 1]
+        # 3) Fast OSQP call (warm starts + leaner tolerances usually good for ADMM outer loop)
+        QP["prob"].solve(
+            solver=cp.OSQP,
+            warm_start=True,
+            verbose=False,
+            eps_abs=1e-4,      # adjust if you need tighter
+            eps_rel=1e-4,
+            max_iter=10000,
+            polish=False,
+            adaptive_rho=True,
+            linsys_solver="qdldl"  # default; explicit here for clarity
+        )
 
-        QP["prob"].solve(solver=cp.OSQP, warm_start=True, verbose=False)
-        coeffs_x = QP["ax"]
-        coeffs_y = QP["ay"]
+        # 4) Pull stacked coeffs (slices are cheap)
+        coeffs_x = [QP["ax_s"][6*i:6*(i+1)] for i in range(QP["num_segments"])]
+        coeffs_y = [QP["ay_s"][6*i:6*(i+1)] for i in range(QP["num_segments"])]
+
         end_iter = time.perf_counter()
+
 
         x_traj = []
         for i in range(len(segment_times) - 1):
@@ -412,7 +458,9 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         )
         z_traj = [np.column_stack((x, y)) for x, y in zip(projected_x, projected_y)]
 
-        r_inf, s_inf = admm_residuals(QP["Phi_list"], coeffs_x, coeffs_y, z_traj, z_traj_prev, rho)
+        r_inf, s_inf = admm_residuals_stacked(QP["Phi_blk"], QP["ax_s"], QP["ay_s"],
+                                      z_traj, z_traj_prev, rho)
+
         if k % 1 == 0:
             print(f"resids: r_inf={r_inf:.3e}, s_inf={s_inf:.3e}, rho={rho:.3e}")
 
