@@ -132,6 +132,50 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         return dict(prob=prob, rho=rho, psi=psi, Zu_x=Zu_x, Zu_y=Zu_y, ax=ax, ay=ay, Phi_list=Phi_list)
 
 
+    def admm_residuals(Phi_list, coeffs_x, coeffs_y, z_traj, z_traj_prev, rho):
+        """Primal r = Phi a - z (in sample space); Dual s = rho * Phi^T (z - z_prev) (in coeff space)."""
+        r_inf = 0.0
+        s_inf = 0.0
+        for i, Phi in enumerate(Phi_list):
+            ax_i = coeffs_x[i].value
+            ay_i = coeffs_y[i].value
+            # primal residuals at samples
+            rx = Phi @ ax_i - z_traj[i][:, 0]
+            ry = Phi @ ay_i - z_traj[i][:, 1]
+            r_inf = max(r_inf, np.linalg.norm(rx, np.inf), np.linalg.norm(ry, np.inf))
+            # dual residuals mapped back to coeff space
+            dz = z_traj[i] - z_traj_prev[i]
+            sx = rho * (Phi.T @ dz[:, 0])
+            sy = rho * (Phi.T @ dz[:, 1])
+            s_inf = max(s_inf, np.linalg.norm(sx, np.inf), np.linalg.norm(sy, np.inf))
+        return r_inf, s_inf
+
+    def update_rho(rho, r_inf, s_inf,
+                tau_inc=2.0, kappa_inc=1.0, factor_inc=10.0,
+                tau_dec=50.0, kappa_dec=0.2, factor_dec=10.0,
+                rho_min=1e-6, rho_max=1e6):
+        """
+        Asymmetrisches rho-Update
+        """
+
+        if s_inf < 1e-16 and r_inf < 1e-16:
+            return rho
+
+        # Erhöhen (r >> s)
+        if r_inf > tau_inc * s_inf and s_inf > 0:
+            rho_new = rho * (r_inf / s_inf) ** kappa_inc * factor_inc
+
+        # Reduzieren (s >> r)
+        elif s_inf > tau_dec * r_inf and r_inf > 0:
+            rho_new = rho * (r_inf / s_inf) ** kappa_dec * factor_dec
+
+        else:
+            rho_new = rho
+
+        return float(np.clip(rho_new, rho_min, rho_max))
+
+
+
     # Parameter
     area_size = tuple(config["area_size"])
     shape = config["shape"]
@@ -157,7 +201,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
     print("Hindernisse generiert")
 
-    # Umgedreht (x, y) → für pydecomp & plotting
+    # Umgedreht (x, y) für pydecomp & plotting
     start_xy = (start[1], start[0])
     goal_xy = (goal[1], goal[0])
 
@@ -176,7 +220,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         ax.set_ylim(0, area_size[1])
         ax.grid(True)
 
-        # Hindernisse (Wald)
+        # Hindernisse
         forest_np = np.array(obstacles)
         ax.plot(forest_np[:, 0], forest_np[:, 1], 'go', markersize=3, label='Bäume')
 
@@ -204,7 +248,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         ax.set_ylim(0, area_size[1])
         ax.grid(True)
 
-        # Hindernisse (Wald)
+        # Hindernisse
         forest_np = np.array(obstacles)
         ax.plot(forest_np[:, 0], forest_np[:, 1], 'go', markersize=3, label='Bäume')
 
@@ -244,7 +288,6 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     # Generate trajectory coefficients
     coeffs_x, coeffs_y, segment_times = minimum_snap_trajectory(start_xy, goal_xy, v_start, v_end, upsampled_path, psi, num_segments=num_segments)
 
-    # === NEW: precompute constant matrices and build QP once ===
     Phi_list, Tmid_list, bounds, Q_list = precompute_bases(segment_times, n_samples_per_seg=num_segments)
 
     # Constant midpoint targets from the *upsampled* path (matches num_segments)
@@ -264,6 +307,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         Phi_list=Phi_list, Tmid_list=Tmid_list, bounds=bounds, Q_list=Q_list
     )
 
+    QP["rho"].value = rho
 
     projected_x, projected_y, reassigned = project_segments_to_convex_regions(
             coeffs_x, coeffs_y, segment_times, A_list, b_list,
@@ -321,41 +365,37 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
     u_traj = [x - z for x, z in zip(x_traj, z_traj)]  # u^1
 
+    rho_list = []
+
+    fig_rho, ax_rho   = plt.subplots(figsize=(6, 3))
+
     for k in range(max_iters):
         print(f"--- Iteration {k+1} ---")
         start_iter = time.perf_counter()
+
         if k == 0:
-            z_traj_prev = z_traj.copy()
+            z_traj_prev = [z.copy() for z in z_traj]
+
+        
         if k > 0:
-            z_traj_extrapolated = [
-                z_curr + beta * (z_curr - z_prev)
-                for z_curr, z_prev in zip(z_traj, z_traj_prev)
-            ]
+            z_traj_extrapolated = [z + beta * (z - zp) for z, zp in zip(z_traj, z_traj_prev)]
         else:
             z_traj_extrapolated = z_traj
 
-        psi = psi_iterating # Update psi for next iteration
-
-
-        # === NEW: update Parameters and solve without rebuilding ===
+        psi = psi_iterating
         QP["rho"].value = rho
-        QP["psi"].value = psi  # or psi_iterating if you update it each iter
+        QP["psi"].value = psi
 
         for i in range(len(segment_times) - 1):
-            # z - u targets per sample (must match n_samples_per_seg)
-            Zu = z_traj_extrapolated[i] - u_traj[i]          # shape (m, 2)
+            Zu = z_traj_extrapolated[i] - u_traj[i]      # shape (m,2)
             QP["Zu_x"][i].value = Zu[:, 0]
             QP["Zu_y"][i].value = Zu[:, 1]
 
-        # Reuse factorization; OSQP is great for this pattern
         QP["prob"].solve(solver=cp.OSQP, warm_start=True, verbose=False)
-
-        # Grab the new polynomial coefficients
         coeffs_x = QP["ax"]
         coeffs_y = QP["ay"]
         end_iter = time.perf_counter()
 
-        # Neue x-Trajektorie berechnen (aus Polynomkoeffizienten)
         x_traj = []
         for i in range(len(segment_times) - 1):
             t_vals = np.linspace(0, segment_times[i+1] - segment_times[i], num_segments)
@@ -367,16 +407,27 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
         projected_x, projected_y, reassigned = project_segments_to_convex_regions(
             coeffs_x, coeffs_y, segment_times, A_list, b_list,
-            path_reference=path_real,
-            use_path_guidance=use_path_guidance,
-            lambda_path=lambda_path,
-            n_samples=num_segments
+            path_reference=path_real, use_path_guidance=use_path_guidance,
+            lambda_path=lambda_path, n_samples=num_segments
         )
-
         z_traj = [np.column_stack((x, y)) for x, y in zip(projected_x, projected_y)]
 
-        # DUAL UPDATE
+        r_inf, s_inf = admm_residuals(QP["Phi_list"], coeffs_x, coeffs_y, z_traj, z_traj_prev, rho)
+        if k % 1 == 0:
+            print(f"resids: r_inf={r_inf:.3e}, s_inf={s_inf:.3e}, rho={rho:.3e}")
+
+        # Dual update (scaled)
         u_traj = [u + (x - z) for u, x, z in zip(u_traj, x_traj, z_traj)]
+
+        if k >= 3 and (k % 5 == 0):        # gate updates
+            rho_new = update_rho(rho, r_inf, s_inf)
+            if rho_new != rho:
+                scale = rho / rho_new      
+                u_traj = [scale * u for u in u_traj]
+                rho = rho_new
+                QP["rho"].value = rho
+
+        rho_list.append(rho)
 
         # KONVERGENZTEST
         max_diff = max(np.linalg.norm(x - z, ord=np.inf) for x, z in zip(x_traj, z_traj))
@@ -409,8 +460,8 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
             plt.show()
             break
 
-        # OPTIONAL: Zwischenstand visualisieren
         ax = pdc.visualize_environment(Al=A_list, bl=b_list, p=path_real, planar=True)
+
 
         ax.plot(start_xy[0], start_xy[1], 'go', label='Start')
         ax.plot(goal_xy[0], goal_xy[1], 'bo', label='Goal')
@@ -440,12 +491,16 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         ax.set_aspect('equal')
         ax.grid(True)
         ax.legend()
+
+        iters = np.arange(len(rho_list))
+        ax_rho.plot(iters, rho_list, 'k-', label="ρ")
+        ax_rho.set_xlabel("Iteration")
+        ax_rho.set_ylabel("ρ")
+        ax_rho.grid(True)
         print(f"Iter {k+1} Dauer: {end_iter - start_iter:.3f} Sekunden")
         plt.pause(0.1)
         plt.clf()
 
-        
-
-        z_traj_prev = z_traj.copy()
+    z_traj_prev = [z.copy() for z in z_traj]
 
 
