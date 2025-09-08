@@ -1,31 +1,90 @@
 import numpy as np
+from scipy.spatial import cKDTree
 
 def evaluate_polynomial(coeffs, t_vals):
-    return np.array([sum(c * t**i for i, c in enumerate(coeffs)) for t in t_vals])
+    return np.polyval(coeffs[::-1], t_vals)
 
 def is_inside_polyhedron(A, b, points, tol=1e-6):
-    # Prüfe, ob alle Punkte Ax <= b erfüllen
-    return np.all(A @ points.T <= b[:, None] + tol)
+    return np.all(A @ points.T <= b[:, None] + tol, axis=0).all()
 
-def project_point_to_polyhedron(A, b, point):
-    # Projektionsproblem: min ||x - point||^2 s.t. A x <= b
-    import cvxpy as cp
-    x = cp.Variable(2)
-    objective = cp.Minimize(cp.sum_squares(x - point))
-    constraints = [A @ x <= np.array(b).flatten()]
 
-    problem = cp.Problem(objective, constraints)
-    problem.solve()
-    return x.value if x.value is not None else point
+def _is_feasible(A, b, x, tol=1e-10):
+    return np.all(A @ x <= b + tol)
 
-def project_point_to_polyhedron_with_reference(A, b, point, ref, lambd=1.0):
-    import cvxpy as cp
-    x = cp.Variable(2)
-    objective = cp.Minimize(cp.sum_squares(x - point) + lambd * cp.sum_squares(x - ref))
-    constraints = [A @ x <= np.array(b).flatten()]
-    problem = cp.Problem(objective, constraints)
-    problem.solve()
-    return x.value if x.value is not None else point
+def _project_to_halfspace_boundary(c, a, beta):
+    # Project c onto the line a^T x = beta
+    denom = np.dot(a, a)
+    if denom == 0:
+        return None
+    t = (np.dot(a, c) - beta) / denom
+    return c - t * a
+
+def _solve_equalities(a1, b1, a2, b2, tol=1e-14):
+    # Solve [a1^T; a2^T] x = [b1; b2]
+    M = np.vstack([a1, a2])
+    det = M[0,0]*M[1,1] - M[0,1]*M[1,0]
+    if abs(det) < tol:
+        return None  # parallel or nearly singular
+    return np.linalg.solve(M, np.array([b1, b2], dtype=float))
+
+import numpy as np
+
+def project_point_to_polyhedron(A, b, point, tol=1e-10):
+    A = np.asarray(A, float)
+    b = np.asarray(b, float).reshape(-1)
+    p = np.asarray(point, float).reshape(2)
+    if A.shape[1] != 2:
+        raise ValueError("2D only (A is m x 2).")
+
+    # If already feasible
+    if np.all(A @ p <= b + tol):
+        return p.copy()
+
+    m = A.shape[0]
+    cand = []
+
+    # (1) Feasible line-feet for all constraints (vectorized)
+    An2 = np.einsum("ij,ij->i", A, A)
+    denom_ok = An2 > tol
+    if np.any(denom_ok):
+        t = (A @ p - b) / An2
+        X = p - t[:, None] * A
+        feas = np.all(A @ X.T <= b[:, None] + tol, axis=0)
+        cand.append(X[denom_ok & feas])
+
+    # (2) All feasible pairwise intersections (vertices), vectorized
+    if m >= 2:
+        I, J = np.triu_indices(m, 1)
+        ai, aj = A[I], A[J]
+        bi, bj = b[I], b[J]
+        det = ai[:, 0]*aj[:, 1] - ai[:, 1]*aj[:, 0]
+        mask = np.abs(det) > tol
+        if np.any(mask):
+            ai, aj, bi, bj, det = ai[mask], aj[mask], bi[mask], bj[mask], det[mask]
+            Xv = np.empty((det.shape[0], 2))
+            Xv[:, 0] = (aj[:, 1]*bi - ai[:, 1]*bj) / det
+            Xv[:, 1] = (-aj[:, 0]*bi + ai[:, 0]*bj) / det
+            feas = np.all(A @ Xv.T <= b[:, None] + tol, axis=0)
+            cand.append(Xv[feas])
+
+    if not cand:
+        return p.copy()
+    C = np.vstack([c for c in cand if c.size]) if len(cand) > 1 else cand[0]
+    if C.size == 0:
+        return p.copy()
+    d2 = np.sum((C - p) ** 2, axis=1)
+    return C[np.argmin(d2)]
+
+def project_point_to_polyhedron_with_reference(A, b, point, ref, lambd=1.0, tol=1e-10):
+    if lambd < 0:
+        raise ValueError("lambd must be >= 0")
+    p = np.asarray(point, float).reshape(2)
+    r = np.asarray(ref, float).reshape(2)
+    c = (p + lambd * r) / (1.0 + lambd)
+    return project_point_to_polyhedron(A, b, c, tol=tol)
+
+
+
 
 
 def find_closest_point_on_path(path_points, query_point):
@@ -52,6 +111,11 @@ def project_segments_to_convex_regions(
     segment_assignments = []
     region_segment_count = [0] * len(A_list)
 
+    # Precompute region centroids (approximate, using least-squares pseudo-inverse)
+    region_centroids = [np.mean(np.linalg.pinv(A) @ b, axis=0) for A, b in zip(A_list, b_list)]
+
+    path_tree = cKDTree(path_reference) if path_reference is not None else None
+
     for i in range(len(segment_times) - 1):
         a_x = coeffs_x[i].value
         a_y = coeffs_y[i].value
@@ -62,14 +126,21 @@ def project_segments_to_convex_regions(
         segment_points = np.stack([x_vals, y_vals], axis=1)
 
         # Check if segment lies fully inside any region
+        assigned = False
         for j, (A, b) in enumerate(zip(A_list, b_list)):
             if is_inside_polyhedron(A, b, segment_points):
-                projected_segments_x.append(x_vals)
-                projected_segments_y.append(y_vals)
-                segment_assignments.append(j)
+                if not assigned:
+                    # Store the segment once
+                    projected_segments_x.append(x_vals)
+                    projected_segments_y.append(y_vals)
+                    segment_assignments.append([j])   # list of memberships
+                    assigned = True
+                else:
+                    # Add extra membership
+                    segment_assignments[-1].append(j)
                 region_segment_count[j] += 1
-                break
-        else:
+
+        if not assigned:
             # Projection required
             best_proj_start = None
             best_proj_end = None
@@ -79,24 +150,28 @@ def project_segments_to_convex_regions(
             start_point = segment_points[0]
             end_point = segment_points[-1]
 
-            if use_path_guidance and path_reference is not None:
-                ref_start = find_closest_point_on_path(path_reference, start_point)
-                ref_end   = find_closest_point_on_path(path_reference, end_point)
+            if use_path_guidance and path_tree is not None:
+                _, idx_start = path_tree.query(start_point)
+                _, idx_end   = path_tree.query(end_point)
+                ref_start = path_tree.data[idx_start]
+                ref_end   = path_tree.data[idx_end]
             else:
                 ref_start = start_point
                 ref_end   = end_point
 
-            for j, (A, b) in enumerate(zip(A_list, b_list)):
+            # Only check closest few regions instead of all
+            mid = (start_point + end_point) / 2
+            close_regions = np.argsort([np.linalg.norm(c - mid) for c in region_centroids])[:3]
+
+            for j in close_regions:
+                A, b = A_list[j], b_list[j]
                 if use_path_guidance and path_reference is not None:
-                    proj_start = project_point_to_polyhedron_with_reference(
-                        A, b, start_point, ref_start, lambd=lambda_path
-                    )
-                    proj_end   = project_point_to_polyhedron_with_reference(
-                        A, b, end_point, ref_end, lambd=lambda_path
-                    )
+                    proj_start = project_point_to_polyhedron_with_reference(A, b, start_point, ref_start, lambd=lambda_path)
+                    proj_end   = project_point_to_polyhedron_with_reference(A, b, end_point, ref_end, lambd=lambda_path)
                 else:
                     proj_start = project_point_to_polyhedron(A, b, start_point)
                     proj_end   = project_point_to_polyhedron(A, b, end_point)
+
 
                 proj_mid = (proj_start + proj_end) / 2
                 orig_mid = (start_point + end_point) / 2
@@ -113,13 +188,14 @@ def project_segments_to_convex_regions(
                 y_vals_proj = np.linspace(best_proj_start[1], best_proj_end[1], len(t_vals))
                 projected_segments_x.append(x_vals_proj)
                 projected_segments_y.append(y_vals_proj)
-                segment_assignments.append(best_region_idx)
+                segment_assignments.append([best_region_idx])
                 region_segment_count[best_region_idx] += 1
             else:
                 # fallback to unprojected segment
                 projected_segments_x.append(x_vals)
                 projected_segments_y.append(y_vals)
-                segment_assignments.append(-1)  # Mark as unassigned
+                segment_assignments.append([-1])  # Mark as unassigned
+
 
     # Postprocess: ensure each region has at least one assigned segment
     for uncovered_idx, count in enumerate(region_segment_count):

@@ -13,7 +13,9 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
     import numpy as np
     import cvxpy as cp
-    from scipy.sparse import block_diag as sp_block_diag, csr_matrix
+    from scipy.sparse import block_diag as sp_block_diag, csr_matrix, csc_matrix, vstack as sp_vstack, hstack as sp_hstack
+    from scipy.sparse.linalg import splu
+
 
 
     import time
@@ -56,6 +58,93 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
             ))
 
         return Phi_list, Tmid_list, bounds, Q_list
+    
+    def stack_bases(Phi_list, Q_list, Tmid_list):
+        Phi_blk  = sp_block_diag([csr_matrix(P) for P in Phi_list], format="csr")         # ((S*m) x (6S))
+        Q_blk    = sp_block_diag([csr_matrix(Q) for Q in Q_list], format="csr")           # ((6S) x (6S))
+        Tmid_blk = sp_block_diag([csr_matrix(T.reshape(1,-1)) for T in Tmid_list], format="csr")  # (S x (6S))
+        return Phi_blk, Q_blk, Tmid_blk
+
+    def build_equality_constraints(segment_times, bounds):
+        """
+        Returns Aeq (neq x 6S), beq_x, beq_y builders (you'll pass start/goal/v later).
+        Continuity rows are homogeneous (b=0). Start/end rows get b from start/goal.
+        """
+        S = len(segment_times) - 1
+        rows = []
+        rhs_tags = []  # tags to fill b later
+
+        def seg_col_slice(i):
+            return slice(6*i, 6*(i+1))
+
+        # Start: pos & vel on segment 0 at t=0
+        T0    = np.array([1,0,0,0,0,0])
+        T0dot = np.array([0,1,0,0,0,0])
+        r = np.zeros(6*S); r[seg_col_slice(0)] = T0;    rows.append(r); rhs_tags.append(("start","pos"))
+        r = np.zeros(6*S); r[seg_col_slice(0)] = T0dot; rows.append(r); rhs_tags.append(("start","vel"))
+
+        # End: pos & vel on last segment at t=dt_end
+        dt_end = segment_times[-1] - segment_times[-2]
+        T1    = np.array([1, dt_end, dt_end**2, dt_end**3, dt_end**4, dt_end**5])
+        T1dot = np.array([0, 1, 2*dt_end, 3*dt_end**2, 4*dt_end**3, 5*dt_end**4])
+        r = np.zeros(6*S); r[seg_col_slice(S-1)] = T1;    rows.append(r); rhs_tags.append(("end","pos"))
+        r = np.zeros(6*S); r[seg_col_slice(S-1)] = T1dot; rows.append(r); rhs_tags.append(("end","vel"))
+
+        # C^3 continuity between segments i and i+1
+        for i in range(S-1):
+            b = bounds[i]
+            for key_left, key_right in [
+                ("T_end", "T_start"),
+                ("T_dot_end", "T_dot0"),
+                ("T_dd_end", "T_ddot0"),
+                ("T_ddd_end", "T_dddot0"),
+            ]:
+                r = np.zeros(6*S)
+                r[seg_col_slice(i)]   = b[key_left]
+                r[seg_col_slice(i+1)] = -b[key_right]
+                rows.append(r); rhs_tags.append(("cont", None))
+
+        Aeq = csr_matrix(np.vstack(rows))  # (neq x 6S)
+
+        def beq_for_axis(start_xy, goal_xy, v_start, v_end):
+            b = []
+            for tag in rhs_tags:
+                if tag == ("start","pos"): b.append(start_xy)
+                elif tag == ("start","vel"): b.append(v_start)
+                elif tag == ("end","pos"): b.append(goal_xy)
+                elif tag == ("end","vel"): b.append(v_end)
+                else: b.append(0.0)
+            return np.array(b)
+
+        return Aeq, beq_for_axis
+    
+    def build_kkt_solver(Phi_blk, Q_blk, Tmid_blk, Aeq, rho_fix, psi_fix):
+        # Precompute constant Hessian
+        H = (Q_blk * 2.0 + (Phi_blk.T @ Phi_blk) * rho_fix + (Tmid_blk.T @ Tmid_blk) * (2.0 * psi_fix)).tocsr()
+
+        # KKT matrix (symmetric indefinite; use LU for robustness)
+        zero_ll = csr_matrix((Aeq.shape[0], Aeq.shape[0]))
+        KKT = sp_blah = sp_vstack([
+            sp_hstack([H, Aeq.T]),
+            sp_hstack([Aeq, zero_ll]),
+        ]).tocsc()
+
+        KKT_factor = splu(KKT)  # factorize once
+
+        def solve_axis(ZU_axis_stacked, t_mid_axis, beq_axis):
+            # q = -rho * Phi^T * Zu - 2*psi * Tmid^T * t_mid
+            q = -(Phi_blk.T @ ZU_axis_stacked) * rho_fix - (Tmid_blk.T @ t_mid_axis) * (2.0 * psi_fix)
+
+            rhs = np.concatenate([-q, beq_axis])  # [ -q ; b ]
+            sol = KKT_factor.solve(rhs)
+
+            n = H.shape[0]
+            a = np.array(sol[:n]).reshape(-1)   # guaranteed (6S,) 1D vector
+            return a
+
+
+        return solve_axis, H.shape[0]
+
 
 
     def build_problem(segment_times, start_xy, goal_xy, v_start, v_end,
@@ -152,30 +241,27 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
 
 
-    def admm_residuals_stacked(Phi_blk, ax_s, ay_s, z_traj, z_traj_prev, rho):
-        """
-        r = Phi a - z  (computed for x and y, take max-inf norm)
-        s = rho * Phi^T (z - z_prev)
-        Uses stacked (block-diagonal) Phi and stacked vars.
-        """
-        import numpy as np
-
-        # Stack current and previous z's: shape ((num_segments*m) x 2)
+    def admm_residuals_stacked(Phi_blk, a_x_vec, a_y_vec, z_traj, z_traj_prev, rho_val):
         Z  = np.vstack(z_traj)
         Zp = np.vstack(z_traj_prev)
 
-        # Primal residuals
-        rx = Phi_blk @ ax_s.value - Z[:, 0]
-        ry = Phi_blk @ ay_s.value - Z[:, 1]
+        # ensure 1D
+        a_x_vec = np.asarray(a_x_vec).ravel()
+        a_y_vec = np.asarray(a_y_vec).ravel()
+
+        rx = Phi_blk @ a_x_vec - Z[:, 0]
+        ry = Phi_blk @ a_y_vec - Z[:, 1]
         r_inf = max(np.linalg.norm(rx, np.inf), np.linalg.norm(ry, np.inf))
 
-        # Dual residuals
         dz = Z - Zp
-        sx = rho * (Phi_blk.T @ dz[:, 0])
-        sy = rho * (Phi_blk.T @ dz[:, 1])
+        sx = rho_val * (Phi_blk.T @ dz[:, 0])
+        sy = rho_val * (Phi_blk.T @ dz[:, 1])
         s_inf = max(np.linalg.norm(sx, np.inf), np.linalg.norm(sy, np.inf))
 
         return r_inf, s_inf
+
+
+
 
 
     def update_rho(rho, r_inf, s_inf,
@@ -318,6 +404,19 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
     Phi_list, Tmid_list, bounds, Q_list = precompute_bases(segment_times, n_samples_per_seg=num_segments)
 
+    Phi_blk, Q_blk, Tmid_blk = stack_bases(Phi_list, Q_list, Tmid_list)
+
+    Aeq, beq_for_axis = build_equality_constraints(segment_times, bounds)
+    beq_x = beq_for_axis(start_xy[0], goal_xy[0], v_start[0], v_end[0])
+    beq_y = beq_for_axis(start_xy[1], goal_xy[1], v_start[1], v_end[1])
+
+    # Choose fixed rho/psi for inner loop (use your current starting values)
+    rho_inner = rho
+    psi_inner = psi_iterating  # or psi if you prefer
+
+    solve_axis, n_coeff = build_kkt_solver(Phi_blk, Q_blk, Tmid_blk, Aeq, rho_inner, psi_inner)
+
+
     # Constant midpoint targets from the *upsampled* path (matches num_segments)
     mid_targets = []
     for i in range(len(segment_times) - 1):
@@ -401,65 +500,59 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         print(f"--- Iteration {k+1} ---")
         start_iter = time.perf_counter()
 
-        # 1) Extrapolation (vectorized)
+        # stack/extrapolate
         if k == 0:
             z_traj_prev = [z.copy() for z in z_traj]
 
-        if k > 0:
-            # stack once, operate once
-            Z   = np.vstack(z_traj)           # ((num_segments*m) x 2)
-            Zp  = np.vstack(z_traj_prev)
-            Zex = Z + beta * (Z - Zp)
-        else:
-            Zex = np.vstack(z_traj)
+        Z  = np.vstack(z_traj)
+        Zp = np.vstack(z_traj_prev)
+        Zex = Z + beta * (Z - Zp) if k > 0 else Z
 
-        U   = np.vstack(u_traj)               # same stacked shape
-        ZU  = Zex - U                         
+        U  = np.vstack(u_traj)
+        ZU = Zex - U                             # ((S*m) x 2)
 
-        # 2) Single-parameter updates + scalar params
-        QP["rho"].value = rho
-        QP["psi"].value = psi_iterating
-        QP["Zu_x"].value = ZU[:, 0].ravel()
-        QP["Zu_y"].value = ZU[:, 1].ravel()
+        # Build stacked inputs
+        ZU_x = ZU[:, 0]
+        ZU_y = ZU[:, 1]
+        t_mid_x = mid_targets[:, 0]
+        t_mid_y = mid_targets[:, 1]
 
-        # 3) Fast OSQP call (warm starts + leaner tolerances usually good for ADMM outer loop)
-        QP["prob"].solve(
-            solver=cp.OSQP,
-            warm_start=True,
-            verbose=False,
-            eps_abs=1e-4,      # adjust if you need tighter
-            eps_rel=1e-4,
-            max_iter=10000,
-            polish=False,
-            adaptive_rho=True,
-            linsys_solver="qdldl"  # default; explicit here for clarity
-        )
+        a_x_stacked = solve_axis(ZU_x, t_mid_x, beq_x)   # (6S,)
+        a_y_stacked = solve_axis(ZU_y, t_mid_y, beq_y)   # (6S,)
 
-        # 4) Pull stacked coeffs (slices are cheap)
-        coeffs_x = [QP["ax_s"][6*i:6*(i+1)] for i in range(QP["num_segments"])]
-        coeffs_y = [QP["ay_s"][6*i:6*(i+1)] for i in range(QP["num_segments"])]
+        # Unstack into per-segment coeff vectors (to keep downstream code unchanged)
+        coeffs_x = [cp.Constant(a_x_stacked[6*i:6*(i+1)]) for i in range(len(segment_times)-1)]
+        coeffs_y = [cp.Constant(a_y_stacked[6*i:6*(i+1)]) for i in range(len(segment_times)-1)]
 
         end_iter = time.perf_counter()
+
 
 
         x_traj = []
         for i in range(len(segment_times) - 1):
             t_vals = np.linspace(0, segment_times[i+1] - segment_times[i], num_segments)
-            a_x = coeffs_x[i].value
-            a_y = coeffs_y[i].value
-            x_vals = [evaluate_polynomial(a_x, t) for t in t_vals]
-            y_vals = [evaluate_polynomial(a_y, t) for t in t_vals]
+            a_x_seg = coeffs_x[i].value   # avoid shadowing stacked vector
+            a_y_seg = coeffs_y[i].value
+            x_vals = [evaluate_polynomial(a_x_seg, t) for t in t_vals]
+            y_vals = [evaluate_polynomial(a_y_seg, t) for t in t_vals]
             x_traj.append(np.column_stack((x_vals, y_vals)))
 
+        start_proj = time.perf_counter()
         projected_x, projected_y, reassigned = project_segments_to_convex_regions(
             coeffs_x, coeffs_y, segment_times, A_list, b_list,
             path_reference=path_real, use_path_guidance=use_path_guidance,
             lambda_path=lambda_path, n_samples=num_segments
         )
+        end_proj = time.perf_counter()
+
+
         z_traj = [np.column_stack((x, y)) for x, y in zip(projected_x, projected_y)]
 
-        r_inf, s_inf = admm_residuals_stacked(QP["Phi_blk"], QP["ax_s"], QP["ay_s"],
-                                      z_traj, z_traj_prev, rho)
+        r_inf, s_inf = admm_residuals_stacked(
+            Phi_blk, a_x_stacked, a_y_stacked,
+            z_traj, z_traj_prev, rho
+        )
+
 
         if k % 1 == 0:
             print(f"resids: r_inf={r_inf:.3e}, s_inf={s_inf:.3e}, rho={rho:.3e}")
@@ -474,6 +567,8 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
                 u_traj = [scale * u for u in u_traj]
                 rho = rho_new
                 QP["rho"].value = rho
+                solve_axis, n_coeff = build_kkt_solver(Phi_blk, Q_blk, Tmid_blk, Aeq, rho, psi_inner)
+
 
         rho_list.append(rho)
 
@@ -508,46 +603,48 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
             plt.show()
             break
 
-        ax = pdc.visualize_environment(Al=A_list, bl=b_list, p=path_real, planar=True)
+        if k % 20 == 0:
+            ax = pdc.visualize_environment(Al=A_list, bl=b_list, p=path_real, planar=True)
 
 
-        ax.plot(start_xy[0], start_xy[1], 'go', label='Start')
-        ax.plot(goal_xy[0], goal_xy[1], 'bo', label='Goal')
-        ax.plot(obstacles[:, 0], obstacles[:, 1], "o", color="green", label="Bäume")
+            ax.plot(start_xy[0], start_xy[1], 'go', label='Start')
+            ax.plot(goal_xy[0], goal_xy[1], 'bo', label='Goal')
+            ax.plot(obstacles[:, 0], obstacles[:, 1], "o", color="green", label="Bäume")
 
-        # Projizierte Segmente (rot)
-        already_labeled = set()
-        for x_vals, y_vals in zip(projected_x, projected_y):
-            label = "projiziert" if "projiziert" not in already_labeled else ""
-            ax.plot(x_vals, y_vals, 'r-', linewidth=2, label=label)
-            already_labeled.add("projiziert")
+            # Projizierte Segmente (rot)
+            already_labeled = set()
+            for x_vals, y_vals in zip(projected_x, projected_y):
+                label = "projiziert" if "projiziert" not in already_labeled else ""
+                ax.plot(x_vals, y_vals, 'r-', linewidth=2, label=label)
+                already_labeled.add("projiziert")
 
-        for idx, (x_vals, y_vals) in enumerate(zip(projected_x, projected_y)):
-                if any(r[0] == idx for r in reassigned):
-                    ax.plot(
-                        x_vals, y_vals,
-                        color="magenta", linewidth=4, linestyle="--", marker="o", markersize=8,
-                        label="reassigned" if "reassigned" not in ax.get_legend_handles_labels()[1] else ""
-                    )
-                    print("should plot")
+            for idx, (x_vals, y_vals) in enumerate(zip(projected_x, projected_y)):
+                    if any(r[0] == idx for r in reassigned):
+                        ax.plot(
+                            x_vals, y_vals,
+                            color="magenta", linewidth=4, linestyle="--", marker="o", markersize=8,
+                            label="reassigned" if "reassigned" not in ax.get_legend_handles_labels()[1] else ""
+                        )
+                        print("should plot")
 
-        # Aktuelle Trajektorie (bunt)
-        for segment, color in zip(x_traj, colors):
-            ax.plot(segment[:, 0], segment[:, 1], color=color, linewidth=1.5)
+            # Aktuelle Trajektorie (bunt)
+            for segment, color in zip(x_traj, colors):
+                ax.plot(segment[:, 0], segment[:, 1], color=color, linewidth=1.5)
 
-        ax.set_title(f"ADMM Iteration {k+1}")
-        ax.set_aspect('equal')
-        ax.grid(True)
-        ax.legend()
+            ax.set_title(f"ADMM Iteration {k+1}")
+            ax.set_aspect('equal')
+            ax.grid(True)
+            ax.legend()
 
-        iters = np.arange(len(rho_list))
-        ax_rho.plot(iters, rho_list, 'k-', label="ρ")
-        ax_rho.set_xlabel("Iteration")
-        ax_rho.set_ylabel("ρ")
-        ax_rho.grid(True)
-        print(f"Iter {k+1} Dauer: {end_iter - start_iter:.3f} Sekunden")
-        plt.pause(0.1)
-        plt.clf()
+            iters = np.arange(len(rho_list))
+            ax_rho.plot(iters, rho_list, 'k-', label="ρ")
+            ax_rho.set_xlabel("Iteration")
+            ax_rho.set_ylabel("ρ")
+            ax_rho.grid(True)
+            print(f"Primal {k+1} Dauer: {end_iter - start_iter:.7f} Sekunden")
+            print(f"Projection {k+1} Dauer: {end_proj - start_proj:.7f} Sekunden")
+            plt.pause(0.05)
+            plt.clf()
 
     z_traj_prev = [z.copy() for z in z_traj]
 
