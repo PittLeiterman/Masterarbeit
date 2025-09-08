@@ -9,6 +9,11 @@ from core.decomposition import convex_decompose_and_clip
 
 class GridAStarApp:
     def __init__(self, root):
+
+        style = ttk.Style()
+        style.theme_use("calm")
+
+
         self.root = root
         self.root.title("A* Pfadsuche – ohne diagonales Ecken-Schneiden")
 
