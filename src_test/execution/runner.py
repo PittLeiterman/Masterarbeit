@@ -23,7 +23,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     def precompute_bases(segment_times, n_samples_per_seg):
         """Precompute all time-basis rows, the design matrices Phi, mid rows, and snap Qs."""
         num_segments = len(segment_times) - 1
-        Phi_list, Tmid_list, bounds, Q_list = [], [], [], []
+        Phi_list, bounds, Q_list = [], [], []
 
         for i in range(num_segments):
             t0, t1 = segment_times[i], segment_times[i+1]
@@ -36,10 +36,6 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
             t_vals = np.linspace(0, dt, n_samples_per_seg)
             Phi = np.vstack([t_vals**k for k in range(6)]).T  # (m, 6)
             Phi_list.append(Phi)
-
-            # Midpoint basis row
-            tm = 0.5 * dt
-            Tmid_list.append(np.array([1, tm, tm**2, tm**3, tm**4, tm**5]))
 
             # Boundary rows
             T_end     = np.array([1, dt, dt**2, dt**3, dt**4, dt**5])
@@ -57,13 +53,12 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
                 T_start=T_start, T_dot0=T_dot0, T_ddot0=T_ddot0, T_dddot0=T_dddot0
             ))
 
-        return Phi_list, Tmid_list, bounds, Q_list
+        return Phi_list, bounds, Q_list
     
-    def stack_bases(Phi_list, Q_list, Tmid_list):
+    def stack_bases(Phi_list, Q_list):
         Phi_blk  = sp_block_diag([csr_matrix(P) for P in Phi_list], format="csr")         # ((S*m) x (6S))
         Q_blk    = sp_block_diag([csr_matrix(Q) for Q in Q_list], format="csr")           # ((6S) x (6S))
-        Tmid_blk = sp_block_diag([csr_matrix(T.reshape(1,-1)) for T in Tmid_list], format="csr")  # (S x (6S))
-        return Phi_blk, Q_blk, Tmid_blk
+        return Phi_blk, Q_blk
 
     def build_equality_constraints(segment_times, bounds):
         """
@@ -118,9 +113,9 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
         return Aeq, beq_for_axis
     
-    def build_kkt_solver(Phi_blk, Q_blk, Tmid_blk, Aeq, rho_fix, psi_fix):
+    def build_kkt_solver(Phi_blk, Q_blk, Aeq, rho_fix):
         # Precompute constant Hessian
-        H = (Q_blk * 2.0 + (Phi_blk.T @ Phi_blk) * rho_fix + (Tmid_blk.T @ Tmid_blk) * (2.0 * psi_fix)).tocsr()
+        H = (Q_blk * 2.0 + (Phi_blk.T @ Phi_blk) * rho_fix).tocsr()
 
         # KKT matrix (symmetric indefinite; use LU for robustness)
         zero_ll = csr_matrix((Aeq.shape[0], Aeq.shape[0]))
@@ -131,9 +126,9 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
         KKT_factor = splu(KKT)  # factorize once
 
-        def solve_axis(ZU_axis_stacked, t_mid_axis, beq_axis):
+        def solve_axis(ZU_axis_stacked, beq_axis):
             # q = -rho * Phi^T * Zu - 2*psi * Tmid^T * t_mid
-            q = -(Phi_blk.T @ ZU_axis_stacked) * rho_fix - (Tmid_blk.T @ t_mid_axis) * (2.0 * psi_fix)
+            q = -(Phi_blk.T @ ZU_axis_stacked) * rho_fix
 
             rhs = np.concatenate([-q, beq_axis])  # [ -q ; b ]
             sol = KKT_factor.solve(rhs)
@@ -149,7 +144,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
     def build_problem(segment_times, start_xy, goal_xy, v_start, v_end,
                   path_mid_targets,  # shape (num_segments, 2)
-                  Phi_list, Tmid_list, bounds, Q_list):
+                  Phi_list, bounds, Q_list):
         """
         Faster, stacked CVXPY model:
         - single ax, ay (shape 6*num_segments)
@@ -162,7 +157,6 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         # --- Block-diagonal bases (sparse) ---
         Phi_blk   = sp_block_diag([csr_matrix(P) for P in Phi_list], format="csr")     # ((num_segments*m) x (6*num_segments))
         Q_blk     = sp_block_diag([csr_matrix(Q) for Q in Q_list], format="csr")       # ((6*num_segments) x (6*num_segments))
-        Tmid_blk  = sp_block_diag([csr_matrix(T.reshape(1,-1)) for T in Tmid_list], format="csr")  # (num_segments x (6*num_segments))
 
         # --- Decision vars (stacked) ---
         ax = cp.Variable(6 * num_segments)
@@ -170,20 +164,14 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
         # --- Parameters that change per ADMM iter ---
         rho = cp.Parameter(nonneg=True, value=1.0)
-        psi = cp.Parameter(nonneg=True, value=1.0)
         Zu_x = cp.Parameter(num_segments * m, value=np.zeros(num_segments * m))
         Zu_y = cp.Parameter(num_segments * m, value=np.zeros(num_segments * m))
-
-        # --- Path guidance targets (constants) ---
-        tx = path_mid_targets[:, 0]
-        ty = path_mid_targets[:, 1]
 
         # --- Cost: snap + ADMM tracking + midpoint guidance ---
         cost = 0
         cost += cp.quad_form(ax, Q_blk) + cp.quad_form(ay, Q_blk)                          # snap
         cost += (rho/2) * cp.sum_squares(Phi_blk @ ax - Zu_x)                               # ADMM track x
         cost += (rho/2) * cp.sum_squares(Phi_blk @ ay - Zu_y)                               # ADMM track y
-        cost += psi * cp.sum_squares(Tmid_blk @ ax - tx) + psi * cp.sum_squares(Tmid_blk @ ay - ty)
 
         # --- Constraints: start/end + C^3 continuity (slice-based, no tiny params) ---
         constraints = []
@@ -232,7 +220,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
         # Handles used in the loop
         return dict(
-            prob=prob, rho=rho, psi=psi,
+            prob=prob, rho=rho,
             Zu_x=Zu_x, Zu_y=Zu_y,
             ax_s=ax, ay_s=ay,
             Phi_blk=Phi_blk,  # might be handy elsewhere
@@ -299,14 +287,9 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     rho = config["rho"]
     max_iters = config["max_iters"]
     eps = config["eps"]
-    beta = config["beta"]
     v_start = tuple(config["v_start"])
     v_end = tuple(config["v_end"])
-    use_path_guidance = config.get("use_path_guidance")
-    lambda_path = config.get("lambda_path")
     num_segments = config.get("num_segments")
-    psi = config.get("psi")
-    psi_iterating = config.get("psi_iterating")
 
 
     # Baum- und Grid-Erzeugung
@@ -400,11 +383,11 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     upsampled_path = upsample_path(path_real, num_segments+1)
 
     # Generate trajectory coefficients
-    coeffs_x, coeffs_y, segment_times = minimum_snap_trajectory(start_xy, goal_xy, v_start, v_end, upsampled_path, psi, num_segments=num_segments)
+    coeffs_x, coeffs_y, segment_times = minimum_snap_trajectory(start_xy, goal_xy, v_start, v_end, upsampled_path, num_segments=num_segments)
 
-    Phi_list, Tmid_list, bounds, Q_list = precompute_bases(segment_times, n_samples_per_seg=num_segments)
+    Phi_list, bounds, Q_list = precompute_bases(segment_times, n_samples_per_seg=num_segments)
 
-    Phi_blk, Q_blk, Tmid_blk = stack_bases(Phi_list, Q_list, Tmid_list)
+    Phi_blk, Q_blk = stack_bases(Phi_list, Q_list)
 
     Aeq, beq_for_axis = build_equality_constraints(segment_times, bounds)
     beq_x = beq_for_axis(start_xy[0], goal_xy[0], v_start[0], v_end[0])
@@ -412,9 +395,8 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
     # Choose fixed rho/psi for inner loop (use your current starting values)
     rho_inner = rho
-    psi_inner = psi_iterating  # or psi if you prefer
 
-    solve_axis, n_coeff = build_kkt_solver(Phi_blk, Q_blk, Tmid_blk, Aeq, rho_inner, psi_inner)
+    solve_axis, n_coeff = build_kkt_solver(Phi_blk, Q_blk, Aeq, rho_inner)
 
 
     # Constant midpoint targets from the *upsampled* path (matches num_segments)
@@ -431,17 +413,13 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         start_xy=start_xy, goal_xy=goal_xy,
         v_start=v_start, v_end=v_end,
         path_mid_targets=mid_targets,
-        Phi_list=Phi_list, Tmid_list=Tmid_list, bounds=bounds, Q_list=Q_list
+        Phi_list=Phi_list, bounds=bounds, Q_list=Q_list
     )
 
     QP["rho"].value = rho
 
     projected_x, projected_y, reassigned = project_segments_to_convex_regions(
-            coeffs_x, coeffs_y, segment_times, A_list, b_list,
-            path_reference=path_real,
-            use_path_guidance=use_path_guidance,
-            lambda_path=lambda_path,
-            n_samples=num_segments
+            coeffs_x, coeffs_y, segment_times, A_list, b_list, n_samples=num_segments
         )
 
     colors = cm.viridis(np.linspace(0, 1, len(segment_times) - 1))
@@ -505,8 +483,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
             z_traj_prev = [z.copy() for z in z_traj]
 
         Z  = np.vstack(z_traj)
-        Zp = np.vstack(z_traj_prev)
-        Zex = Z + beta * (Z - Zp) if k > 0 else Z
+        Zex = Z 
 
         U  = np.vstack(u_traj)
         ZU = Zex - U                             # ((S*m) x 2)
@@ -514,11 +491,9 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         # Build stacked inputs
         ZU_x = ZU[:, 0]
         ZU_y = ZU[:, 1]
-        t_mid_x = mid_targets[:, 0]
-        t_mid_y = mid_targets[:, 1]
 
-        a_x_stacked = solve_axis(ZU_x, t_mid_x, beq_x)   # (6S,)
-        a_y_stacked = solve_axis(ZU_y, t_mid_y, beq_y)   # (6S,)
+        a_x_stacked = solve_axis(ZU_x, beq_x)   # (6S,)
+        a_y_stacked = solve_axis(ZU_y, beq_y)   # (6S,)
 
         # Unstack into per-segment coeff vectors (to keep downstream code unchanged)
         coeffs_x = [cp.Constant(a_x_stacked[6*i:6*(i+1)]) for i in range(len(segment_times)-1)]
@@ -539,9 +514,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
         start_proj = time.perf_counter()
         projected_x, projected_y, reassigned = project_segments_to_convex_regions(
-            coeffs_x, coeffs_y, segment_times, A_list, b_list,
-            path_reference=path_real, use_path_guidance=use_path_guidance,
-            lambda_path=lambda_path, n_samples=num_segments
+            coeffs_x, coeffs_y, segment_times, A_list, b_list, n_samples=num_segments
         )
         end_proj = time.perf_counter()
 
@@ -567,7 +540,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
                 u_traj = [scale * u for u in u_traj]
                 rho = rho_new
                 QP["rho"].value = rho
-                solve_axis, n_coeff = build_kkt_solver(Phi_blk, Q_blk, Tmid_blk, Aeq, rho, psi_inner)
+                solve_axis, n_coeff = build_kkt_solver(Phi_blk, Q_blk, Aeq, rho)
 
 
         rho_list.append(rho)

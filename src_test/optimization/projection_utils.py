@@ -98,9 +98,6 @@ def project_segments_to_convex_regions(
     segment_times,
     A_list,
     b_list,
-    path_reference=None,
-    use_path_guidance=False,
-    lambda_path=1.0,
     n_samples=30
 ):
     projected_segments_x = []
@@ -113,8 +110,6 @@ def project_segments_to_convex_regions(
 
     # Precompute region centroids (approximate, using least-squares pseudo-inverse)
     region_centroids = [np.mean(np.linalg.pinv(A) @ b, axis=0) for A, b in zip(A_list, b_list)]
-
-    path_tree = cKDTree(path_reference) if path_reference is not None else None
 
     for i in range(len(segment_times) - 1):
         a_x = coeffs_x[i].value
@@ -150,14 +145,8 @@ def project_segments_to_convex_regions(
             start_point = segment_points[0]
             end_point = segment_points[-1]
 
-            if use_path_guidance and path_tree is not None:
-                _, idx_start = path_tree.query(start_point)
-                _, idx_end   = path_tree.query(end_point)
-                ref_start = path_tree.data[idx_start]
-                ref_end   = path_tree.data[idx_end]
-            else:
-                ref_start = start_point
-                ref_end   = end_point
+            ref_start = start_point
+            ref_end   = end_point
 
             # Only check closest few regions instead of all
             mid = (start_point + end_point) / 2
@@ -165,12 +154,8 @@ def project_segments_to_convex_regions(
 
             for j in close_regions:
                 A, b = A_list[j], b_list[j]
-                if use_path_guidance and path_reference is not None:
-                    proj_start = project_point_to_polyhedron_with_reference(A, b, start_point, ref_start, lambd=lambda_path)
-                    proj_end   = project_point_to_polyhedron_with_reference(A, b, end_point, ref_end, lambd=lambda_path)
-                else:
-                    proj_start = project_point_to_polyhedron(A, b, start_point)
-                    proj_end   = project_point_to_polyhedron(A, b, end_point)
+                proj_start = project_point_to_polyhedron(A, b, start_point)
+                proj_end   = project_point_to_polyhedron(A, b, end_point)
 
 
                 proj_mid = (proj_start + proj_end) / 2
