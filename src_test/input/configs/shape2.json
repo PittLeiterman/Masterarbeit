@@ -4,15 +4,11 @@
     "start": [2,2],
     "goal": [23,23],
     "keep": [0, 1, 4, -1],
-    "rho": 150.0,
+    "rho": 0.001,
     "max_iters": 200,
-    "eps": 0.2,
-    "beta": 0.05,
+    "eps": 0.01,
     "v_start": [0.0, 0.0],
     "v_end": [0.0, 0.0],
-    "use_path_guidance": false,
-    "lambda_path": 0.5,
     "num_segments": 30,
-    "psi": 1000,
-    "psi_iterating": 1000
+    "m_per_seg": 30
 }

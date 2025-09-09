@@ -8,51 +8,40 @@ def is_inside_polyhedron(A, b, points, tol=1e-6):
     return np.all(A @ points.T <= b[:, None] + tol, axis=0).all()
 
 
-def _is_feasible(A, b, x, tol=1e-10):
-    return np.all(A @ x <= b + tol)
-
-def _project_to_halfspace_boundary(c, a, beta):
-    # Project c onto the line a^T x = beta
-    denom = np.dot(a, a)
-    if denom == 0:
-        return None
-    t = (np.dot(a, c) - beta) / denom
-    return c - t * a
-
-def _solve_equalities(a1, b1, a2, b2, tol=1e-14):
-    # Solve [a1^T; a2^T] x = [b1; b2]
-    M = np.vstack([a1, a2])
-    det = M[0,0]*M[1,1] - M[0,1]*M[1,0]
-    if abs(det) < tol:
-        return None  # parallel or nearly singular
-    return np.linalg.solve(M, np.array([b1, b2], dtype=float))
-
-import numpy as np
-
 def project_point_to_polyhedron(A, b, point, tol=1e-10):
+    """
+    Robuster 2D-Punkt-Input und Projektion in ein konvexes Polyeder {x | A x <= b}.
+    """
     A = np.asarray(A, float)
     b = np.asarray(b, float).reshape(-1)
-    p = np.asarray(point, float).reshape(2)
-    if A.shape[1] != 2:
-        raise ValueError("2D only (A is m x 2).")
 
-    # If already feasible
+    # --- robustes Punkt-Shape ---
+    p = np.asarray(point, float).reshape(-1)
+    if p.size != 2:
+        raise ValueError(f"Expected 2D point, got shape {np.asarray(point).shape} (size {p.size})")
+    p = p[:2]
+
+    if A.ndim != 2 or A.shape[1] != 2:
+        raise ValueError("2D only (A must be m x 2).")
+
+    # Bereits zulässig?
     if np.all(A @ p <= b + tol):
         return p.copy()
 
     m = A.shape[0]
     cand = []
 
-    # (1) Feasible line-feet for all constraints (vectorized)
-    An2 = np.einsum("ij,ij->i", A, A)
-    denom_ok = An2 > tol
-    if np.any(denom_ok):
-        t = (A @ p - b) / An2
-        X = p - t[:, None] * A
-        feas = np.all(A @ X.T <= b[:, None] + tol, axis=0)
-        cand.append(X[denom_ok & feas])
+    # (1) Orthogonale Projektion auf jede Halbraum-Grenze a_i^T x = b_i, dann Feasibility check
+    if m > 0:
+        An2 = np.einsum("ij,ij->i", A, A)
+        denom_ok = An2 > tol
+        if np.any(denom_ok):
+            t = (A @ p - b) / np.maximum(An2, tol)
+            X = p - t[:, None] * A
+            feas = np.all(A @ X.T <= b[:, None] + tol, axis=0)
+            cand.append(X[denom_ok & feas])
 
-    # (2) All feasible pairwise intersections (vertices), vectorized
+    # (2) Schnittpunkte aller Paare (Eckpunkte), dann Feasibility
     if m >= 2:
         I, J = np.triu_indices(m, 1)
         ai, aj = A[I], A[J]
@@ -67,183 +56,134 @@ def project_point_to_polyhedron(A, b, point, tol=1e-10):
             feas = np.all(A @ Xv.T <= b[:, None] + tol, axis=0)
             cand.append(Xv[feas])
 
+    # Fallbacks
     if not cand:
         return p.copy()
     C = np.vstack([c for c in cand if c.size]) if len(cand) > 1 else cand[0]
     if C.size == 0:
         return p.copy()
+
+    # Nächster zulässiger Punkt
     d2 = np.sum((C - p) ** 2, axis=1)
     return C[np.argmin(d2)]
 
-def project_point_to_polyhedron_with_reference(A, b, point, ref, lambd=1.0, tol=1e-10):
-    if lambd < 0:
-        raise ValueError("lambd must be >= 0")
-    p = np.asarray(point, float).reshape(2)
-    r = np.asarray(ref, float).reshape(2)
-    c = (p + lambd * r) / (1.0 + lambd)
-    return project_point_to_polyhedron(A, b, c, tol=tol)
 
+def project_segment_cpoints_to_best_region(C_seg, A_list, b_list):
+    """
+    Robust gegen flache/unerwartete Shapes; projiziert ALLE Kontrollpunkte eines Segments
+    in jeden Set und wählt den Set mit minimaler Summe der quadratischen Abstände.
+    """
+    C_seg = np.asarray(C_seg, dtype=float)
+    if C_seg.ndim == 1:
+        if C_seg.size % 2 != 0:
+            raise ValueError(f"C_seg has odd size {C_seg.size}, expected even")
+        C_seg = C_seg.reshape(-1, 2)
+    elif C_seg.shape[1] != 2:
+        C_seg = C_seg.reshape(-1, 2)
 
+    best_cost, best_idx, best_proj = np.inf, None, None
+    for j, (A, b) in enumerate(zip(A_list, b_list)):
+        P = np.vstack([project_point_to_polyhedron(A, b, p) for p in C_seg])
+        cost = np.sum((P - C_seg)**2)
+        if cost < best_cost:
+            best_cost, best_idx, best_proj = cost, j, P
+    return best_proj, best_idx
 
+def project_segments_with_coverage(C_segments, A_list, b_list):
+    import numpy as np
 
+    def _proj_cost_for_region(C_seg, A, b):
+        P = np.vstack([project_point_to_polyhedron(A, b, p) for p in C_seg])
+        cost = float(np.sum((P - C_seg)**2))
+        return P, cost
 
-def find_closest_point_on_path(path_points, query_point):
-    dists = np.linalg.norm(path_points - query_point, axis=1)
-    return path_points[np.argmin(dists)]
+    C_segments = [np.asarray(C, float).reshape(-1, 2) for C in C_segments]
+    S = len(C_segments)
+    R = len(A_list)
+    if S < R:
+        raise ValueError(f"Erfordert num_segments >= num_regions, aber S={S} < R={R}. "
+                         f"Erhöhe num_segments oder fusioniere Regionen.")
 
-
-def project_segments_to_convex_regions(
-    coeffs_x,
-    coeffs_y,
-    segment_times,
-    A_list,
-    b_list,
-    n_samples=30
-):
-    projected_segments_x = []
-    projected_segments_y = []
-
-    reassigned_segments = []
-
-    segment_assignments = []
-    region_segment_count = [0] * len(A_list)
-
-    # Precompute region centroids (approximate, using least-squares pseudo-inverse)
-    region_centroids = [np.mean(np.linalg.pinv(A) @ b, axis=0) for A, b in zip(A_list, b_list)]
-
-    for i in range(len(segment_times) - 1):
-        a_x = coeffs_x[i].value
-        a_y = coeffs_y[i].value
-
-        t_vals = np.linspace(0, segment_times[i + 1] - segment_times[i], n_samples)
-        x_vals = evaluate_polynomial(a_x, t_vals)
-        y_vals = evaluate_polynomial(a_y, t_vals)
-        segment_points = np.stack([x_vals, y_vals], axis=1)
-
-        # Check if segment lies fully inside any region
-        assigned = False
+    # --- Precompute Projektionen & Kosten ---
+    costs = np.zeros((S, R), dtype=float)
+    projs = {}  # (i,j) -> (ctrl_per_seg,2)
+    for i, C in enumerate(C_segments):
         for j, (A, b) in enumerate(zip(A_list, b_list)):
-            if is_inside_polyhedron(A, b, segment_points):
-                if not assigned:
-                    # Store the segment once
-                    projected_segments_x.append(x_vals)
-                    projected_segments_y.append(y_vals)
-                    segment_assignments.append([j])   # list of memberships
-                    assigned = True
-                else:
-                    # Add extra membership
-                    segment_assignments[-1].append(j)
-                region_segment_count[j] += 1
+            P, c = _proj_cost_for_region(C, A, b)
+            projs[(i, j)] = P
+            costs[i, j]  = c
 
-        if not assigned:
-            # Projection required
-            best_proj_start = None
-            best_proj_end = None
-            closest_dist = float('inf')
-            best_region_idx = None
+    # --- DP über zusammenhängende Blöcke ---
+    INF = 1e18
+    prefix = np.vstack([np.zeros((1, R)), np.cumsum(costs, axis=0)])  # (S+1,R)
 
-            start_point = segment_points[0]
-            end_point = segment_points[-1]
+    dp   = np.full((R + 1, S + 1), INF, dtype=float)
+    prev = np.full((R + 1, S + 1), -1, dtype=int)
+    dp[0, 0] = 0.0
 
-            ref_start = start_point
-            ref_end   = end_point
+    for j in range(1, R + 1):
+        e_min = j
+        e_max = S - (R - j)
+        for e in range(e_min, e_max + 1):
+            best = INF
+            best_s = -1
+            col = j - 1
+            s_min = j - 1
+            s_max = e - 1
+            for s in range(s_min, s_max + 1):
+                block_cost = prefix[e, col] - prefix[s, col]  # Sum costs[s:e, j-1]
+                val = dp[j - 1, s] + block_cost
+                if val < best:
+                    best = val
+                    best_s = s
+            dp[j, e] = best
+            prev[j, e] = best_s
 
-            # Only check closest few regions instead of all
-            mid = (start_point + end_point) / 2
-            close_regions = np.argsort([np.linalg.norm(c - mid) for c in region_centroids])[:3]
+    # --- Rekonstruktion ---
+    # --- Rekonstruktion: Blockenden statt Blockstarts verwenden ---
+    ends = [S]          # e_R
+    e = S
+    for j in range(R, 1, -1):         # bis j=2 zurücklaufen; s_1=0 wollen wir NICHT aufnehmen
+        s = int(prev[j, e])
+        if s < 0:
+            raise RuntimeError(
+                f"DP backtrack failed at j={j}, e={e}. "
+                f"dp[j, e]={dp[j, e]}, prev[j, e]={prev[j, e]}."
+            )
+        ends.append(s)                # e_{j-1} = s_j
+        e = s
 
-            for j in close_regions:
-                A, b = A_list[j], b_list[j]
-                proj_start = project_point_to_polyhedron(A, b, start_point)
-                proj_end   = project_point_to_polyhedron(A, b, end_point)
-
-
-                proj_mid = (proj_start + proj_end) / 2
-                orig_mid = (start_point + end_point) / 2
-                dist = np.linalg.norm(proj_mid - orig_mid)
-
-                if dist < closest_dist:
-                    closest_dist = dist
-                    best_proj_start = proj_start
-                    best_proj_end = proj_end
-                    best_region_idx = j
-
-            if best_proj_start is not None and best_proj_end is not None:
-                x_vals_proj = np.linspace(best_proj_start[0], best_proj_end[0], len(t_vals))
-                y_vals_proj = np.linspace(best_proj_start[1], best_proj_end[1], len(t_vals))
-                projected_segments_x.append(x_vals_proj)
-                projected_segments_y.append(y_vals_proj)
-                segment_assignments.append([best_region_idx])
-                region_segment_count[best_region_idx] += 1
-            else:
-                # fallback to unprojected segment
-                projected_segments_x.append(x_vals)
-                projected_segments_y.append(y_vals)
-                segment_assignments.append([-1])  # Mark as unassigned
+    ends = ends[::-1]                 # [e_1, e_2, ..., e_{R-1}, S]
+    boundaries = [0] + ends           # [0, e_1, e_2, ..., e_{R-1}, S]
 
 
-    # Postprocess: ensure each region has at least one assigned segment
-    for uncovered_idx, count in enumerate(region_segment_count):
-        print("Region:", uncovered_idx, "Segmente", count)
-        if count == 0:
-            lower_idx = uncovered_idx - 1 if uncovered_idx - 1 >= 0 else None
-            upper_idx = uncovered_idx + 1 if uncovered_idx + 1 < len(A_list) else None
+    # --- Sanity Checks für Grenzen ---
+    bnd = np.array(boundaries, dtype=int)
+    if bnd[0] != 0 or bnd[-1] != S:
+        raise RuntimeError(f"Ungültige boundaries (Start/Ende): {boundaries} vs S={S}")
+    if np.any(np.diff(bnd) <= 0):
+        raise RuntimeError(f"Boundaries nicht streng ansteigend: {boundaries}")
 
-            candidates = []
-            for neighbour in [lower_idx, upper_idx]:
-                if neighbour is None:
-                    continue
+    # --- Assign bauen, initial mit -1 ---
+    assign = np.full(S, -1, dtype=int)
+    for j in range(R):
+        s, e = int(bnd[j]), int(bnd[j + 1])
+        assign[s:e] = j
 
-                seg_indices = [i for i, idx in enumerate(segment_assignments) if idx == neighbour]
-                if not seg_indices:
-                    continue
+    if (assign < 0).any():
+        holes = np.where(assign < 0)[0].tolist()
+        raise RuntimeError(f"Assignment unvollständig, Lücken in Segmenten {holes}. "
+                           f"Boundaries: {boundaries}, S={S}, R={R}")
 
-                # order rule: take last seg from lower neighbour, first seg from upper neighbour
-                if neighbour < uncovered_idx:
-                    donor_seg = max(seg_indices)
-                else:
-                    donor_seg = min(seg_indices)
+    # --- Z_traj zusammensetzen ---
+    Z_blocks = []
+    ctrl_per_seg = C_segments[0].shape[0]
+    for i in range(S):
+        j = int(assign[i])
+        if (i, j) not in projs:
+            raise KeyError(f"Projektion fehlt für (seg={i}, region={j}). "
+                           f"S={S}, R={R}, assign[{i}]={j}")
+        Z_blocks.append(projs[(i, j)])
+    Z_traj = np.vstack(Z_blocks).reshape(S * ctrl_per_seg, 2)
 
-                # projection distance
-                start_point = np.array([projected_segments_x[donor_seg][0], projected_segments_y[donor_seg][0]])
-                end_point   = np.array([projected_segments_x[donor_seg][-1], projected_segments_y[donor_seg][-1]])
-                proj_start  = project_point_to_polyhedron(A_list[uncovered_idx], b_list[uncovered_idx], start_point)
-                proj_end    = project_point_to_polyhedron(A_list[uncovered_idx], b_list[uncovered_idx], end_point)
-                dist        = np.linalg.norm(((proj_start + proj_end) / 2) - ((start_point + end_point) / 2))
-
-                candidates.append((dist, neighbour, donor_seg, proj_start, proj_end))
-
-            if not candidates:
-                print(f"WARNING: Could not find neighbour donor for region {uncovered_idx}")
-                continue
-
-            # pick best candidate
-            candidates.sort(key=lambda c: c[0])
-            _, donor_idx, s_idx, proj_start, proj_end = candidates[0]
-
-
-            start_point = np.array([projected_segments_x[s_idx][0], projected_segments_y[s_idx][0]])
-            end_point   = np.array([projected_segments_x[s_idx][-1], projected_segments_y[s_idx][-1]])
-
-            proj_start = project_point_to_polyhedron(A_list[uncovered_idx], b_list[uncovered_idx], start_point)
-            proj_end   = project_point_to_polyhedron(A_list[uncovered_idx], b_list[uncovered_idx], end_point)
-
-            new_x = np.linspace(proj_start[0], proj_end[0], len(projected_segments_x[s_idx]))
-            new_y = np.linspace(proj_start[1], proj_end[1], len(projected_segments_y[s_idx]))
-
-            projected_segments_x[s_idx] = new_x
-            projected_segments_y[s_idx] = new_y
-
-            print(f"Reassigning segment {s_idx} from region {donor_idx} → region {uncovered_idx}")
-            reassigned_segments.append((s_idx, donor_idx, uncovered_idx))
-
-            region_segment_count[uncovered_idx] += 1
-            region_segment_count[donor_idx] -= 1
-
-    print("\nUpdated region assignments after projection fix:")
-    for idx, count in enumerate(region_segment_count):
-        print(f"Region {idx}: Segmente {count}")
-
-    return projected_segments_x, projected_segments_y, reassigned_segments
-
-
+    return Z_traj, assign, costs
