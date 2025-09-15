@@ -1,12 +1,4 @@
 import numpy as np
-from scipy.spatial import cKDTree
-
-def evaluate_polynomial(coeffs, t_vals):
-    return np.polyval(coeffs[::-1], t_vals)
-
-def is_inside_polyhedron(A, b, points, tol=1e-6):
-    return np.all(A @ points.T <= b[:, None] + tol, axis=0).all()
-
 
 def project_point_to_polyhedron(A, b, point, tol=1e-10):
     """
@@ -67,27 +59,6 @@ def project_point_to_polyhedron(A, b, point, tol=1e-10):
     d2 = np.sum((C - p) ** 2, axis=1)
     return C[np.argmin(d2)]
 
-
-def project_segment_cpoints_to_best_region(C_seg, A_list, b_list):
-    """
-    Robust gegen flache/unerwartete Shapes; projiziert ALLE Kontrollpunkte eines Segments
-    in jeden Set und wählt den Set mit minimaler Summe der quadratischen Abstände.
-    """
-    C_seg = np.asarray(C_seg, dtype=float)
-    if C_seg.ndim == 1:
-        if C_seg.size % 2 != 0:
-            raise ValueError(f"C_seg has odd size {C_seg.size}, expected even")
-        C_seg = C_seg.reshape(-1, 2)
-    elif C_seg.shape[1] != 2:
-        C_seg = C_seg.reshape(-1, 2)
-
-    best_cost, best_idx, best_proj = np.inf, None, None
-    for j, (A, b) in enumerate(zip(A_list, b_list)):
-        P = np.vstack([project_point_to_polyhedron(A, b, p) for p in C_seg])
-        cost = np.sum((P - C_seg)**2)
-        if cost < best_cost:
-            best_cost, best_idx, best_proj = cost, j, P
-    return best_proj, best_idx
 
 def project_segments_with_coverage(C_segments, A_list, b_list):
     import numpy as np

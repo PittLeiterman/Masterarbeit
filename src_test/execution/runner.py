@@ -6,7 +6,6 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     from optimization.primal_step import evaluate_polynomial
 
     from optimization.minco import precompute_mapping
-    from optimization.sampling import build_Phi
     from utils.cvx_compat import Const
     from scipy.sparse import csc_matrix
     from scipy.sparse.linalg import splu
