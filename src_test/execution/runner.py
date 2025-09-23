@@ -379,6 +379,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         X  = np.column_stack([Cx, Cy])          # ((6S) x 2)
 
         z_traj_prev = z_traj.copy()   
+        end_iter = time.perf_counter()
 
         # Projektion pro Segment auf EIN Set (Kontrollpunkte)
         start_proj = time.perf_counter()
@@ -386,9 +387,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         z_traj, assign, _ = project_segments_with_coverage(C_segments, A_list, b_list)
 
         end_proj = time.perf_counter()
-        end_iter = time.perf_counter()
-
-
+    
 
         x_traj = []
         for i in range(len(segment_times) - 1):
