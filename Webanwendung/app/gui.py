@@ -6,12 +6,13 @@ from core.astar import astar
 from core.simplify import simplify_rdp
 from core.decomposition import convex_decompose_and_clip
 
+from core.admm import run_admm_from_app
+import os
+
+
 
 class GridAStarApp:
     def __init__(self, root):
-
-        style = ttk.Style()
-        style.theme_use("calm")
 
 
         self.root = root
@@ -46,7 +47,9 @@ class GridAStarApp:
         ttk.Button(control, text="Smoothing", command=self.smoothing).pack(side=tk.LEFT, padx=(12,0))
         ttk.Button(control, text="Pfad vereinfachen", command=self.simplify_path).pack(side=tk.LEFT, padx=(12,0))
         ttk.Button(control, text="Zerlegung", command=self.decompose).pack(side=tk.LEFT, padx=(6,0))
+        ttk.Button(control, text="ADMM", command=self.run_admm).pack(side=tk.LEFT, padx=(6,0))
         ttk.Button(control, text="Zurücksetzen", command=self.reset_all).pack(side=tk.LEFT)
+
 
 
         # --- Canvas ---
@@ -130,6 +133,9 @@ class GridAStarApp:
         self.start = None
         self.goal = None
         self.path = []
+        self.canvas.delete("admm_curve")
+        self.canvas.delete("admm_ctrl")
+
         self.build_grid()
 
     # --- Hilfen ---
@@ -303,6 +309,7 @@ class GridAStarApp:
             return
         try:
             A_list, b_list = convex_decompose_and_clip(self.blocks, self.simplified, self.cols, self.rows)
+            self.decomp = (A_list, b_list)
         except Exception as e:
             messagebox.showerror("Fehler bei Zerlegung", str(e))
             return
@@ -349,6 +356,89 @@ class GridAStarApp:
                 self.canvas.tag_lower("decomp", top_tag)
             except tk.TclError:
                 pass
+
+    def run_admm(self):
+        if not self.path:
+            messagebox.showinfo("Hinweis", "Bitte zuerst mit A* einen Pfad berechnen.")
+            return
+
+        if not self.simplified:
+            self.simplify_path()
+            if not self.simplified:
+                messagebox.showinfo("Hinweis", "Konnte Pfad nicht vereinfachen.")
+                return
+
+        if not self.decomp:
+            self.decompose()
+            if not self.decomp:
+                messagebox.showinfo("Hinweis", "Bitte erst 'Zerlegung' ausführen.")
+                return
+
+        A_list, b_list = self.decomp
+
+        # Clear previous ADMM drawings
+        self.canvas.delete("admm_curve")
+        self.canvas.delete("admm_ctrl")
+
+        # Config file path (adjust if you put it elsewhere)
+        config_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "config", "admm.json"
+        )
+
+        try:
+            out = run_admm_from_app(
+                A_list, b_list,
+                simplified_cells=self.simplified,
+                start_cell=self.start, goal_cell=self.goal,
+                grid_cols=self.cols, grid_rows=self.rows,
+                config_path=config_path
+            )
+        except Exception as e:
+            messagebox.showerror("ADMM Fehler", str(e))
+            return
+
+        # Draw trajectory segments (grid -> pixels)
+        for seg in out["segments_samples"]:
+            flat = []
+            for (x, y) in seg:
+                flat += [x * self.cell_size, y * self.cell_size]
+            if len(flat) >= 4:
+                self.canvas.create_line(
+                    *flat, fill="#d35400", width=3,
+                    smooth=True, splinesteps=24, tags=("admm_curve",)
+                )
+
+        # Optional: visualize projected control polygons Z
+        Z = out["ctrl_points"]
+        cps = out["ctrl_per_seg"]; S = out["S"]
+        for i in range(S):
+            block = Z[i*cps:(i+1)*cps]
+            # polygon
+            flat = []
+            for (x, y) in block:
+                flat += [x * self.cell_size, y * self.cell_size]
+            if len(flat) >= 4:
+                self.canvas.create_line(*flat, fill="#7f8c8d", width=1, tags=("admm_ctrl",))
+            # control points
+            for (x, y) in block:
+                px, py = x * self.cell_size, y * self.cell_size
+                r = 2.5
+                self.canvas.create_oval(px-r, py-r, px+r, py+r, fill="#7f8c8d", width=0, tags=("admm_ctrl",))
+
+        # Layering
+        try:
+            self.canvas.tag_raise("admm_ctrl", "decomp")
+            self.canvas.tag_raise("admm_curve", "admm_ctrl")
+        except tk.TclError:
+            pass
+        for top_tag in ("tree", "traj", "marker", "simp"):
+            try:
+                self.canvas.tag_raise(top_tag, "admm_curve")
+            except tk.TclError:
+                pass
+
+
 
     def _clip_polygon_halfspace(self, poly, a, b):
         if not poly: return []

@@ -1,0 +1,7 @@
+{
+    "rho": 0.000001,
+    "max_iters": 200,
+    "eps": 0.01,
+    "num_segments": 30,
+    "m_per_seg": 30
+}

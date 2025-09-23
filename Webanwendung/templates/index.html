@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <title>A* + Zerlegung + ADMM (Web)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    canvas { image-rendering: pixelated; }
+  </style>
+</head>
+<body class="min-h-screen bg-slate-100 text-slate-900">
+  <div class="max-w-6xl mx-auto p-6 space-y-4">
+    <h1 class="text-2xl font-bold">A* Pfadsuche – mit Zerlegung & ADMM</h1>
+
+    <!-- Controls -->
+    <div class="flex flex-wrap items-end gap-3 bg-white p-4 rounded-xl shadow">
+      <div>
+        <label class="block text-xs uppercase tracking-wide">Zeilen</label>
+        <input id="rowsInput" type="number" value="25" class="border rounded px-2 py-1 w-24">
+      </div>
+      <div>
+        <label class="block text-xs uppercase tracking-wide">Spalten</label>
+        <input id="colsInput" type="number" value="25" class="border rounded px-2 py-1 w-24">
+      </div>
+      <button id="buildBtn" class="px-4 py-2 bg-slate-800 text-white rounded-lg">Raster erstellen</button>
+
+      <div class="ml-4 flex gap-2">
+        <label class="flex items-center gap-2">
+          <input type="radio" name="mode" value="block" checked>
+          <span>Hindernisse</span>
+        </label>
+        <label class="flex items-center gap-2">
+          <input type="radio" name="mode" value="start">
+          <span>Start setzen</span>
+        </label>
+        <label class="flex items-center gap-2">
+          <input type="radio" name="mode" value="goal">
+          <span>Ziel setzen</span>
+        </label>
+      </div>
+      <!-- Iteration viewer (hidden until ADMM ran) -->
+      <div id="iterPanel" class="hidden w-full max-w-6xl bg-white p-4 rounded-xl shadow flex items-center gap-3">
+        <label class="text-sm font-medium">Iteration:</label>
+        <input id="iterSlider" type="range" min="0" max="0" value="0" class="w-full">
+        <span id="iterLabel" class="text-sm tabular-nums">0 / 0</span>
+        <label class="ml-4 flex items-center gap-2 text-sm">
+          <input id="showProj" type="checkbox">
+          <span>Show projections</span>
+        </label>
+      </div>
+
+
+      <div class="ml-auto flex gap-2">
+        <button id="astarBtn" class="px-3 py-2 bg-blue-600 text-white rounded-lg">Bestätigen (A*)</button>
+        <button id="simplifyBtn" class="px-3 py-2 bg-amber-600 text-white rounded-lg">Pfad vereinfachen</button>
+        <button id="decompBtn" class="px-3 py-2 bg-indigo-600 text-white rounded-lg">Zerlegung</button>
+        <button id="admmBtn" class="px-3 py-2 bg-orange-600 text-white rounded-lg">ADMM</button>
+        <button id="resetBtn" class="px-3 py-2 bg-slate-500 text-white rounded-lg">Zurücksetzen</button>
+      </div>
+    </div>
+
+    <!-- Canvas -->
+    <div class="bg-white p-4 rounded-xl shadow">
+      <canvas id="grid" width="601" height="601" class="block mx-auto bg-white rounded"></canvas>
+    </div>
+  </div>
+
+  <script>
+    // ---------- state ----------
+    let rows = 25, cols = 25, cellSize = 24;
+    const canvas = document.getElementById("grid");
+    const ctx = canvas.getContext("2d");
+
+    let mode = "block";
+    let dragging = false;
+    let dragMode = null; // "draw" or "erase"
+    let painted = new Set();
+
+    const blocks = new Set();  // "r,c"
+    let start = null;          // [r,c]
+    let goal = null;           // [r,c]
+    let path = [];             // [[r,c],...]
+    let simplified = [];       // [[r,c],...]
+    let decomp = { A_list: [], b_list: [], regions: [] };
+
+    // view & lifecycle flags
+    // grid: draw per-cell squares; scene: smooth environment (trees, polygons)
+    let viewMode = "grid";
+    // after ADMM ran, hide A* & simplified dots
+    let admmRan = false;
+    let admmIterHistory = [];            // NEW: iterations array from backend
+    let admmColors = [];                 // NEW: region color palette for segments
+
+    // ---------- ui ----------
+    document.querySelectorAll("input[name=mode]").forEach(r => {
+      r.addEventListener("change", () => mode = r.value);
+    });
+    document.getElementById("buildBtn").addEventListener("click", buildGrid);
+    document.getElementById("astarBtn").addEventListener("click", runAstar);
+    document.getElementById("simplifyBtn").addEventListener("click", runSimplify);
+    document.getElementById("decompBtn").addEventListener("click", runDecompose);
+    document.getElementById("admmBtn").addEventListener("click", runAdmm);
+    document.getElementById("resetBtn").addEventListener("click", resetAll);
+
+    canvas.addEventListener("mousedown", onDown);
+    canvas.addEventListener("mousemove", onMove);
+    canvas.addEventListener("mouseup", onUp);
+    canvas.addEventListener("mouseleave", onUp);
+    canvas.addEventListener("click", onClick);
+
+    function key(r,c){ return `${r},${c}`; }
+    function parseKey(k){ const [r,c] = k.split(",").map(Number); return [r,c]; }
+
+    // ---------- grid building ----------
+    function buildGrid(){
+      rows = Math.max(2, parseInt(document.getElementById("rowsInput").value || "25", 10));
+      cols = Math.max(2, parseInt(document.getElementById("colsInput").value || "25", 10));
+      canvas.width = cols*cellSize + 1;
+      canvas.height = rows*cellSize + 1;
+
+      // reset state
+      blocks.clear(); start=null; goal=null; path=[]; simplified=[];
+      decomp={A_list:[], b_list:[], regions:[]};
+      viewMode = "grid";
+      admmRan = false;
+
+      // border blocks like Tkinter
+      for (let r=0;r<rows;r++){ blocks.add(key(r,0)); blocks.add(key(r,cols-1)); }
+      for (let c=0;c<cols;c++){ blocks.add(key(0,c)); blocks.add(key(rows-1,c)); }
+
+      drawAll();
+    }
+
+    function resetAll(){
+      buildGrid();
+    }
+
+    // ---------- mouse painting ----------
+    function onDown(e){
+      if (mode !== "block") return;
+      const [r,c] = xyToCell(e.offsetX, e.offsetY);
+      if (!inBounds(r,c) || (start && r===start[0] && c===start[1]) || (goal && r===goal[0] && c===goal[1])) return;
+      const k = key(r,c);
+      dragMode = blocks.has(k) ? "erase" : "draw";
+      dragging = true;
+      painted.clear();
+      paintCell(r,c);
+    }
+    function onMove(e){
+      if (!dragging || mode !== "block") return;
+      const [r,c] = xyToCell(e.offsetX, e.offsetY);
+      if (!inBounds(r,c)) return;
+      if (start && r===start[0] && c===start[1]) return;
+      if (goal && r===goal[0] && c===goal[1]) return;
+      paintCell(r,c);
+    }
+    function onUp(){ dragging = false; dragMode = null; painted.clear(); }
+    function onClick(e){
+      if (mode === "block") return;
+      const [r,c] = xyToCell(e.offsetX, e.offsetY);
+      if (!inBounds(r,c)) return;
+      if (blocks.has(key(r,c))) return; // can't place on obstacle
+      if (mode === "start"){ start = [r,c]; }
+      else if (mode === "goal"){ goal = [r,c]; }
+      drawAll();
+    }
+    function paintCell(r,c){
+      const k = key(r,c);
+      if (painted.has(k)) return;
+      painted.add(k);
+      if (dragMode === "draw"){ blocks.add(k); }
+      else { blocks.delete(k); }
+      // keep border blocked
+      for (let i=0;i<rows;i++){ blocks.add(key(i,0)); blocks.add(key(i,cols-1)); }
+      for (let j=0;j<cols;j++){ blocks.add(key(0,j)); blocks.add(key(rows-1,j)); }
+      drawAll();
+    }
+
+    function xyToCell(x,y){ return [Math.floor(y/cellSize), Math.floor(x/cellSize)]; }
+    function inBounds(r,c){ return r>=0 && r<rows && c>=0 && c<cols; }
+
+    // ---------- drawing ----------
+    function drawAll(){
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      if (viewMode === "grid"){
+        drawGridCells();
+        drawBlocksAsSquares();
+      } else {
+        drawSceneBackground();
+        drawDecompositionPolys(); // under trees
+        drawTreesForBlocks();
+      }
+      drawStartGoalMarkers();
+
+      if (!admmRan){
+        drawPath();
+        drawSimplifiedDots();
+      }
+    }
+
+    function drawGridCells(){
+      ctx.strokeStyle = "#ddd";
+      for (let r=0;r<rows;r++){
+        for (let c=0;c<cols;c++){
+          ctx.strokeRect(c*cellSize, r*cellSize, cellSize, cellSize);
+        }
+      }
+    }
+    function drawBlocksAsSquares(){
+      ctx.fillStyle = "black";
+      blocks.forEach(k => {
+        const [r,c] = parseKey(k);
+        ctx.fillRect(c*cellSize, r*cellSize, cellSize, cellSize);
+      });
+    }
+
+    // ---- "scene" mode ----
+    function drawSceneBackground(){
+      // plain white already; optionally soft big grid every 5 cells:
+      ctx.strokeStyle = "rgba(0,0,0,0.06)";
+      for (let r=0;r<=rows;r+=5){
+        ctx.beginPath(); ctx.moveTo(0, r*cellSize); ctx.lineTo(cols*cellSize, r*cellSize); ctx.stroke();
+      }
+      for (let c=0;c<=cols;c+=5){
+        ctx.beginPath(); ctx.moveTo(c*cellSize, 0); ctx.lineTo(c*cellSize, rows*cellSize); ctx.stroke();
+      }
+    }
+    function drawDecompositionPolys(){
+      if (!decomp.regions?.length) return;
+      const colors = ["#9ec9ff","#ffe49e","#c1f0c9","#f7b2b7","#d1c0ff","#c0f0f7","#ffd1a6","#b8e1ff"];
+      decomp.regions.forEach((R,idx)=>{
+        const pts = R.poly.map(([x,y])=>[x*cellSize, y*cellSize]);
+        ctx.beginPath();
+        pts.forEach(([px,py],i)=>{ if (i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py); });
+        ctx.closePath();
+        ctx.fillStyle = colors[idx % colors.length] + "80"; // semi transparent
+        ctx.fill();
+        ctx.strokeStyle = "#2c7be5";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // index label at centroid
+        const cx = R.centroid[0]*cellSize;
+        const cy = R.centroid[1]*cellSize;
+        ctx.fillStyle = "#1e3a8a";
+        ctx.font = "bold 14px ui-sans-serif,system-ui";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(String(R.id), cx, cy);
+      });
+    }
+    function drawTreesForBlocks(){
+      blocks.forEach(k => {
+        const [r,c] = parseKey(k);
+        // skip frame border trees
+        if (r===0 || r===rows-1 || c===0 || c===cols-1) return;
+        const x0 = c*cellSize,   y0 = r*cellSize;
+        const x1 = x0+cellSize,  y1 = y0+cellSize;
+
+        // trunk
+        const sx0 = x0 + cellSize*0.45, sx1 = x0 + cellSize*0.55;
+        const sy0 = y0 + cellSize*0.60, sy1 = y0 + cellSize*0.90;
+        ctx.fillStyle = "#8e5a2b";
+        ctx.fillRect(sx0, sy0, sx1-sx0, sy1-sy0);
+
+        // canopy (rounded)
+        const cx0 = x0 + cellSize*0.20, cx1 = x0 + cellSize*0.80;
+        const cy0 = y0 + cellSize*0.10, cy1 = y0 + cellSize*0.70;
+        ctx.beginPath();
+        ctx.ellipse((cx0+cx1)/2, (cy0+cy1)/2,
+          (cx1-cx0)/2, (cy1-cy0)/2, 0, 0, Math.PI*2);
+        ctx.fillStyle = "#27ae60";
+        ctx.fill();
+      });
+    }
+
+    function drawStartGoalMarkers(){
+      const half = cellSize/2;
+      [[start,"#2ecc71"], [goal,"#e74c3c"]].forEach(([cell,color])=>{
+        if (!cell) return;
+        const cx = cell[1]*cellSize + half;
+        const cy = cell[0]*cellSize + half;
+        const r = cellSize*0.30;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI*2);
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = color;
+        ctx.stroke();
+      });
+    }
+
+    function drawPath(){
+      if (path.length < 2) return;
+      ctx.strokeStyle = "#3498db";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      path.forEach(([r,c],i)=>{
+        const x = c*cellSize + cellSize/2;
+        const y = r*cellSize + cellSize/2;
+        if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+      });
+      ctx.stroke();
+    }
+    function drawSimplifiedDots(){
+      if (!simplified.length) return;
+      ctx.fillStyle = "orange";
+      simplified.forEach(([r,c])=>{
+        const x = c*cellSize + cellSize/2;
+        const y = r*cellSize + cellSize/2;
+        ctx.beginPath();
+        ctx.arc(x,y,4,0,Math.PI*2);
+        ctx.fill();
+      });
+    }
+
+    // ---------- backend calls ----------
+    async function runAstar(){
+      if (!start || !goal){ alert("Bitte Start und Ziel setzen."); return; }
+      const res = await fetch("/run_astar", {
+        method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({
+          rows, cols,
+          blocks: Array.from(blocks).map(parseKey),
+          start, goal
+        })
+      });
+      path = await res.json();
+      admmRan = false;
+      drawAll();
+    }
+
+    async function runSimplify(){
+      if (!path.length){ alert("Bitte erst A* laufen lassen."); return; }
+      const res = await fetch("/simplify", {
+        method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ path, epsilon: 1.3 })
+      });
+      simplified = await res.json();
+      admmRan = false;
+      drawAll();
+    }
+
+    async function runDecompose(){
+      if (!simplified.length){ await runSimplify(); if (!simplified.length) return; }
+      const res = await fetch("/decompose", {
+        method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({
+          rows, cols,
+          blocks: Array.from(blocks).map(parseKey),
+          simplified
+        })
+      });
+      const data = await res.json();
+      if (data.error){ alert(data.error); return; }
+      decomp = data;   // {regions, A_list, b_list}
+      // switch to pretty scene mode
+      viewMode = "scene";
+      admmRan = false;
+      drawAll();
+    }
+
+    async function runAdmm(){
+      if (!simplified.length){ await runSimplify(); if (!simplified.length) return; }
+      if (!decomp.A_list?.length){ await runDecompose(); if (!decomp.A_list?.length) return; }
+      if (!start || !goal){ alert("Bitte Start und Ziel setzen."); return; }
+
+      const res = await fetch("/run_admm", {
+        method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({
+          A_list: decomp.A_list, b_list: decomp.b_list,
+          simplified, start, goal, cols, rows
+        })
+      });
+      const out = await res.json();
+
+      // store history
+      admmIterHistory = out.iterations || [];
+      admmRan = true;
+
+      // prepare a consistent color per region id
+      const baseColors = ["#0ea5e9","#22c55e","#d946ef","#f97316","#ef4444","#14b8a6","#8b5cf6","#84cc16","#f59e0b","#06b6d4"];
+      admmColors = baseColors;
+
+      // show and configure the iteration panel
+      const panel = document.getElementById("iterPanel");
+      const slider = document.getElementById("iterSlider");
+      const label  = document.getElementById("iterLabel");
+      panel.classList.remove("hidden");
+      const N = admmIterHistory.length;
+      slider.min = 0; slider.max = Math.max(0, N-1); slider.value = Math.max(0, N-1);
+      label.textContent = `${slider.value} / ${slider.max}`;
+
+      slider.oninput = () => {
+        label.textContent = `${slider.value} / ${slider.max}`;
+        drawADMMIteration(parseInt(slider.value, 10));
+      };
+      document.getElementById("showProj").onchange = () => {
+        drawADMMIteration(parseInt(slider.value, 10));
+      };
+
+      // draw environment and the selected iteration
+      viewMode = "scene";  // keep the nice look
+      drawADMMIteration(parseInt(slider.value, 10));
+    }
+
+    // init
+    buildGrid();
+
+    function drawADMMIteration(idx){
+      // base environment
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      drawSceneBackground();
+      drawDecompositionPolys();
+      drawTreesForBlocks();
+      drawStartGoalMarkers();
+
+      if (!admmIterHistory.length) return;
+      idx = Math.max(0, Math.min(idx, admmIterHistory.length-1));
+
+      const it = admmIterHistory[idx];
+
+      // draw curve segments colored by assigned region
+      ctx.lineWidth = 3;
+      it.segments_samples.forEach((seg, i) => {
+        const regionId = (it.assign && it.assign[i] != null) ? it.assign[i] : i;
+        const color = admmColors[regionId % admmColors.length] || "#d35400";
+        ctx.strokeStyle = color;
+        ctx.beginPath();
+        seg.forEach(([x,y],k) => {
+          const px = x * cellSize, py = y * cellSize;
+          if (k===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+        });
+        ctx.stroke();
+      });
+
+      // optional: show projected control polygons (Z) for this iteration
+      const showProj = document.getElementById("showProj").checked;
+      if (showProj && it.z_ctrl){
+        const cps = it.z_ctrl.length ? it.z_ctrl.length / (it.assign?.length || 1) : 0;
+        if (Number.isFinite(cps) && cps > 0){
+          // Sichtbarkeit deutlich erhöhen
+          const baseWidth = Math.max(3, Math.round(cellSize * 0.14)); // skaliert mit Zoom
+          const haloWidth = baseWidth + 4;
+
+          ctx.save();
+          ctx.lineCap  = "round";
+          ctx.lineJoin = "round";
+
+          for (let s = 0; s < (it.assign?.length || 0); s++){
+            const blk = it.z_ctrl.slice(s*cps, (s+1)*cps);
+
+            // Pfad aufbauen (einmal)
+            ctx.beginPath();
+            blk.forEach(([x,y], k) => {
+              const px = x * cellSize, py = y * cellSize;
+              if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+            });
+
+            // 1) Halo (weiß, etwas transparenter) für Kontrast
+            ctx.strokeStyle = "rgba(255,255,255,0.95)";
+            ctx.lineWidth   = haloWidth;
+            ctx.stroke();
+
+            // 2) Hauptlinie (dunkel)
+            ctx.strokeStyle = "#0f172a"; // slate-900
+            ctx.lineWidth   = baseWidth;
+            ctx.stroke();
+
+            // (Optional) gestrichelt:
+            // ctx.setLineDash([7, 5]); ctx.stroke(); ctx.setLineDash([]);
+          }
+
+          ctx.restore();
+        }
+}
+
+
+  // (Optional) you can print residuals/rho somewhere:
+  // console.log(`k=${it.k}  rho=${it.rho}  r_inf=${it.r_inf}  s_inf=${it.s_inf}`);
+}
+
+  </script>
+</body>
+</html>
