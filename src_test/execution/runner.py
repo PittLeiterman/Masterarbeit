@@ -45,6 +45,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     def visualize_voxelgrid_with_path(
         vg,
         path_idx=None,
+        path_xyz=None,
         tube_radius=0.2,
         grid_opacity=0.25,
         grid_color="blue",
@@ -74,20 +75,28 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         p = pv.Plotter()
         p.add_mesh(surf, color=grid_color, opacity=grid_opacity, show_edges=False)
 
-        if path_idx is None:
+        # nothing to plot? just show grid
+        if path_idx is None and path_xyz is None:
             p.show_axes(); p.show(); return
 
-        path_idx = np.asarray(path_idx)
-        if path_idx.shape[0] >= 2:
-            # Path as tube through voxel centers (world coords)
-            centers = np.array([np.array(vg.info.to_coord(idx)) + 0.5 for idx in path_idx], float)
+        # ---- build centers for tube ----
+        centers = None
+        if path_xyz is not None:
+            centers = np.asarray(path_xyz, float)
+        elif path_idx is not None:
+            path_idx = np.asarray(path_idx)
+            if path_idx.shape[0] >= 2:
+                centers = np.array([np.array(vg.info.to_coord(idx)) + 0.5
+                                    for idx in path_idx], float)
 
+        if centers is not None and centers.shape[0] >= 2:
             line = pv.Spline(centers, n_points=len(centers))
             p.add_mesh(line.tube(radius=tube_radius, n_sides=16), color="red")
 
             if mark_start_end:
                 p.add_mesh(pv.Sphere(radius=tube_radius*turn_scale, center=centers[0]),  color="green")
                 p.add_mesh(pv.Sphere(radius=tube_radius*turn_scale, center=centers[-1]), color="orange")
+    
 
             # Turn markers
             if mark_turns and turns_idx is not None:
@@ -246,24 +255,19 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         return pts[:,0], pts[:,1]
 
 
-    def admm_residuals_cp(Acx, Acy, xi_x, xi_y, Z, Z_prev, rho_val, bcx, bcy):
-        """
-        Residuen für Nebenbedingung:  (T_blk @ (M xi + c)) = Z
-        d.h.  Acx xi + bcx = Z  und  Acy xi + bcy = Z
-        """
-        xi_x = np.asarray(xi_x).ravel()
-        xi_y = np.asarray(xi_y).ravel()
-
-        # Primal residual r = A xi + b - Z
+    def admm_residuals_cp_3d(Acx, Acy, Acz, xi_x, xi_y, xi_z, Z, Z_prev, rho, bcx, bcy, bcz):
+        """Infinity-norm primal/dual residuals for 3 axes."""
+        xi_x = np.asarray(xi_x).ravel(); xi_y = np.asarray(xi_y).ravel(); xi_z = np.asarray(xi_z).ravel()
         rx = Acx @ xi_x + bcx - Z[:, 0]
         ry = Acy @ xi_y + bcy - Z[:, 1]
-        r_inf = max(np.linalg.norm(rx, np.inf), np.linalg.norm(ry, np.inf))
+        rz = Acz @ xi_z + bcz - Z[:, 2]
+        r_inf = max(np.linalg.norm(rx, np.inf), np.linalg.norm(ry, np.inf), np.linalg.norm(rz, np.inf))
 
-        # Dual residual s = rho * A^T (Z - Z_prev)
         dZ = Z - Z_prev
-        sx = rho_val * (Acx.T @ dZ[:, 0])
-        sy = rho_val * (Acy.T @ dZ[:, 1])
-        s_inf = max(np.linalg.norm(sx, np.inf), np.linalg.norm(sy, np.inf))
+        sx = rho * (Acx.T @ dZ[:, 0])
+        sy = rho * (Acy.T @ dZ[:, 1])
+        sz = rho * (Acz.T @ dZ[:, 2])
+        s_inf = max(np.linalg.norm(sx, np.inf), np.linalg.norm(sy, np.inf), np.linalg.norm(sz, np.inf))
         return r_inf, s_inf
 
 
@@ -332,6 +336,9 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     # Pfad Vereinfachung
     turns = np.asarray(keep_turns_np(path_idx))
     turns_idx = turns[keep]
+
+    if DEBUG:
+        
     
     occ_idx   = np.argwhere(vg.grid == 1)            # (M,3)
     obs_np    = (occ_idx + 0.5).astype(np.float64)   # (M,3)
@@ -383,54 +390,67 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     # Build minimum-snap mapping a(xi) = M xi + c for each axis
     coeffs_from_xi_x, Mx, cx, Q_blk = precompute_mapping(
         segment_times,
-        p0=p_all_x[0], pS=p_all_x[-1],
-        v_start=v_start[0], v_end=v_end[0]
+        p0=float(p_all_x[0]), pS=float(p_all_x[-1]),
+        v_start=float(v_start[0]), v_end=float(v_end[0])
     )
+
     coeffs_from_xi_y, My, cy, _ = precompute_mapping(
         segment_times,
-        p0=p_all_y[0], pS=p_all_y[-1],
-        v_start=v_start[1], v_end=v_end[1]
+        p0=float(p_all_y[0]), pS=float(p_all_y[-1]),
+        v_start=float(v_start[1]), v_end=float(v_end[1])
+    )
+
+    coeffs_from_xi_z, Mz, cz, _ = precompute_mapping(
+        segment_times,
+        p0=float(p_all_z[0]), pS=float(p_all_z[-1]),
+        v_start=float(v_start[2]), v_end=float(v_end[2])
     )
 
     # Interior decision variables (initial guess = interior waypoints)
     xi_x = p_all_x[1:-1].copy()
     xi_y = p_all_y[1:-1].copy()
+    xi_z = p_all_z[1:-1].copy()
 
     # Build sampling operator Φ with m_per_seg samples per segment
     T_blk = build_T_block(segment_times, degree=5)
 
-    # Reduced snap terms: H = M^T (2Q) M,  f = M^T (2Q) c
-    Hx = (Mx.T @ (Q_blk @ Mx))
-    fx = (Mx.T @ (Q_blk @ cx))
-    Hy = (My.T @ (Q_blk @ My))
-    fy = (My.T @ (Q_blk @ cy))
+    # -------- Reduced snap terms: H = M^T (2Q) M,  f = M^T (2Q) c (3D) --------
+    Hx = Mx.T @ (Q_blk @ Mx)
+    fx = Mx.T @ (Q_blk @ cx)
 
+    Hy = My.T @ (Q_blk @ My)
+    fy = My.T @ (Q_blk @ cy)
+
+    Hz = Mz.T @ (Q_blk @ Mz)
+    fz = Mz.T @ (Q_blk @ cz)
+
+    # Sampling (power -> Bernstein) operators for each axis
     Acx = T_blk @ Mx;  bcx = T_blk @ cx
     Acy = T_blk @ My;  bcy = T_blk @ cy
+    Acz = T_blk @ Mz;  bcz = T_blk @ cz
 
-    ctrl_per_seg   = T_blk.shape[0] // S
-    coeffs_per_seg = Mx.shape[0] // S 
+    ctrl_per_seg   = T_blk.shape[0] // S          # = degree+1 (e.g., 6)
+    coeffs_per_seg = Mx.shape[0] // S              # = degree+1 (e.g., 6)
 
+    # -------- Build initial coefficients (instead of CVXPY/solve_axis) --------
+    # From interior waypoints xi
+    a_x_stacked = coeffs_from_xi_x(xi_x)          # (6S,)
+    a_y_stacked = coeffs_from_xi_y(xi_y)          # (6S,)
+    a_z_stacked = coeffs_from_xi_z(xi_z)          # (6S,)
 
-    # Build initial coefficients (instead of CVXPY/solve_axis)
-    # Startkoeffizienten aus xi
-    a_x_stacked = coeffs_from_xi_x(xi_x)  # (6S,)
-    a_y_stacked = coeffs_from_xi_y(xi_y)
+    # Control points per axis (Power -> Bernstein via T_blk)
+    Cx0 = T_blk @ a_x_stacked                      # (6S,)
+    Cy0 = T_blk @ a_y_stacked                      # (6S,)
+    Cz0 = T_blk @ a_z_stacked                      # (6S,)
 
-    # Kontrollpunkte aus a (Power->Bernstein via T_blk)
-    Cx0 = T_blk @ a_x_stacked
-    Cy0 = T_blk @ a_y_stacked
-    X = np.column_stack([Cx0, Cy0])          # ((6S) x 2)
+    # Stack to (6S, 3)
+    X = np.column_stack([Cx0, Cy0, Cz0])
+
 
     # Segmentweise Projektion der Kontrollpunkte in den "besten" Set
-    C_segments = [X[ctrl_per_seg*i : ctrl_per_seg*(i+1), :] for i in range(S)]
+    C_segments = [X[ctrl_per_seg*i : ctrl_per_seg*(i+1), :] for i in range(S)]  # X is (6S, 3)
     z_traj, assign, costs_mat = project_segments_with_coverage(C_segments, A_list, b_list)
     u_traj = np.zeros_like(z_traj)
-
-    # (optional) Debug: Coverage prüfen
-    counts = np.bincount(assign, minlength=len(A_list))
-    print("Region-Segment-Zuordnung:", assign)
-    print("Segmente je Region:", counts)
 
 
     z_traj_prev = z_traj.copy()
@@ -441,68 +461,33 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
     rho_list = []
 
-        # ---- Einmalige Visualisierung vor ADMM ----
-    ax0 = pdc.visualize_environment(Al=A_list, bl=b_list, p=path_real, planar=True)
-    ax0.plot(start_xy[0], start_xy[1], 'go', label='Start')
-    ax0.plot(goal_xy[0], goal_xy[1], 'bo', label='Goal')
-    ax0.plot(obstacles[:, 0], obstacles[:, 1], "o", color="green", label="Bäume")
+    visualize_voxelgrid_with_path(
+        vg,
+        path_idx=init_path,        # straight line (indices)
+        tube_radius=0.25,
+        grid_opacity=0.25,
+        grid_color="blue",
+        turns_idx=None,               # optional: or keep your `turns_idx`
+        mark_start_end=True,
+        mark_turns=False,
+        # convex decomposition (half-spaces Ax - b <= 0)
+        A_list=A_list,
+        b_list=b_list,
+        show_decomposition=True,
+        decomp_color="yellow",
+        decomp_opacity=0.18,
+        smooth_shading=True,
+    )
 
-    face_alpha   = 0.12
-    edge_lw      = 1.2
-    curve_lw     = 2.0
-    res_curve    = 900
-
-    for i in range(S):
-        C = z_traj[ctrl_per_seg*i : ctrl_per_seg*(i+1), :]
-
-        # Konvexe Hülle
-        try:
-            hull = ConvexHull(C)
-            H = C[hull.vertices]
-        except Exception:
-            H = C
-        ax0.add_patch(MplPolygon(
-            H, closed=True, facecolor='red', edgecolor='red',
-            linewidth=edge_lw, alpha=face_alpha, zorder=1
-        ))
-
-        # Bézier-Kurve aus projizierten CPs
-        bx, by = bezier_curve_from_cpoints(C, res=res_curve)
-        ax0.plot(bx, by, 'r-', linewidth=curve_lw, alpha=0.95,
-                label='Bézier (projiziert)' if i==0 else "", zorder=2)
-
-
-    # Trajektorie zum Anschauen sampeln (nur Plot)
-    coeffs_x = [Const(a_x_stacked[coeffs_per_seg*i : coeffs_per_seg*(i+1)]) for i in range(S)]
-    coeffs_y = [Const(a_y_stacked[coeffs_per_seg*i : coeffs_per_seg*(i+1)]) for i in range(S)]
-    for i in range(S):
-        dt = segment_times[i+1] - segment_times[i]
-        t_vals = np.linspace(0, dt, 100)
-        ax_i = coeffs_x[i].value
-        ay_i = coeffs_y[i].value
-        xs = [evaluate_polynomial(ax_i, t) for t in t_vals]
-        ys = [evaluate_polynomial(ay_i, t) for t in t_vals]
-        ax0.plot(xs, ys, color='k', alpha=0.6, linewidth=1.5, label='Init curve' if i==0 else "")
-
-    ax0.set_aspect('equal'); ax0.grid(True); ax0.legend()
-    plt.show()
-
-    # --- Rho-Plot vorbereiten ---
-    fig_rho, ax_rho = plt.subplots(figsize=(6, 3))
-    ax_rho.set_xlabel("Iteration")
-    ax_rho.set_ylabel("ρ")
-    ax_rho.grid(True)
-
- 
+    start_iter = time.perf_counter()
     for k in range(max_iters):
         print(f"--- Iteration {k+1} ---")
-        start_iter = time.perf_counter()
 
-        # --- Build ZU (same as before) ---
+        # --- Build ZU ---
         if k == 0:
             z_traj_prev = z_traj.copy()
 
-        ZU = z_traj - u_traj
+        ZU = z_traj - u_traj  # shape (6S, 3)
 
         # --- Cache factorization when rho is unchanged ---
         if k == 0:
@@ -510,54 +495,58 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         if (k == 0) or (rho_cache is None) or (abs(rho_cache - rho) > 0):
             LHSx = Hx + rho * (Acx.T @ Acx)
             LHSy = Hy + rho * (Acy.T @ Acy)
+            LHSz = Hz + rho * (Acz.T @ Acz)
             Lx_factor = splu(csc_matrix(LHSx))
             Ly_factor = splu(csc_matrix(LHSy))
+            Lz_factor = splu(csc_matrix(LHSz))
             rho_cache = rho
 
         # --- RHS and solves in reduced variables xi ---
         RHSx = rho * (Acx.T @ (ZU[:, 0] - bcx)) - fx
         RHSy = rho * (Acy.T @ (ZU[:, 1] - bcy)) - fy
+        RHSz = rho * (Acz.T @ (ZU[:, 2] - bcz)) - fz
 
         xi_x = Lx_factor.solve(RHSx)
         xi_y = Ly_factor.solve(RHSy)
+        xi_z = Lz_factor.solve(RHSz)
 
         # --- Recover coefficients for this iterate ---
         a_x_stacked = coeffs_from_xi_x(xi_x)  # (6S,)
         a_y_stacked = coeffs_from_xi_y(xi_y)
+        a_z_stacked = coeffs_from_xi_z(xi_z)
 
         coeffs_x = [Const(a_x_stacked[coeffs_per_seg*i : coeffs_per_seg*(i+1)]) for i in range(S)]
         coeffs_y = [Const(a_y_stacked[coeffs_per_seg*i : coeffs_per_seg*(i+1)]) for i in range(S)]
+        coeffs_z = [Const(a_z_stacked[coeffs_per_seg*i : coeffs_per_seg*(i+1)]) for i in range(S)]
 
-
-
-        # Aktuelle Kontrollpunkte X (aus a)
+        # Aktuelle Kontrollpunkte X (aus a)  -> (6S,3)
         Cx = T_blk @ a_x_stacked
         Cy = T_blk @ a_y_stacked
-        X  = np.column_stack([Cx, Cy])          # ((6S) x 2)
+        Cz = T_blk @ a_z_stacked
+        X  = np.column_stack([Cx, Cy, Cz])
 
-        z_traj_prev = z_traj.copy()   
-        end_iter = time.perf_counter()
+        z_traj_prev = z_traj.copy()
 
         # Projektion pro Segment auf EIN Set (Kontrollpunkte)
-        start_proj = time.perf_counter()
-        C_segments = [X[ctrl_per_seg*i : ctrl_per_seg*(i+1), :] for i in range(S)]
-        z_traj, assign, _ = project_segments_with_coverage(C_segments, A_list, b_list)
+        C_segments = [X[ctrl_per_seg*i : ctrl_per_seg*(i+1), :] for i in range(S)]  # each (ctrl_per_seg,3)
+        z_traj, assign, _ = project_segments_with_coverage(C_segments, A_list, b_list)  # returns (6S,3)
 
-        end_proj = time.perf_counter()
-    
-
+        # Trajektorie zum Anschauen sampeln (3D)
         x_traj = []
-        for i in range(len(segment_times) - 1):
-            t_vals = np.linspace(0, segment_times[i+1] - segment_times[i], m_per_seg)
-            a_x_seg = coeffs_x[i].value   # avoid shadowing stacked vector
-            a_y_seg = coeffs_y[i].value
-            x_vals = [evaluate_polynomial(a_x_seg, t) for t in t_vals]
-            y_vals = [evaluate_polynomial(a_y_seg, t) for t in t_vals]
-            x_traj.append(np.column_stack((x_vals, y_vals)))
+        for i in range(S):
+            dt = segment_times[i+1] - segment_times[i]
+            t_vals = np.linspace(0, dt, m_per_seg)
+            ax_i = coeffs_x[i].value
+            ay_i = coeffs_y[i].value
+            az_i = coeffs_z[i].value
+            xs = [evaluate_polynomial(ax_i, t) for t in t_vals]
+            ys = [evaluate_polynomial(ay_i, t) for t in t_vals]
+            zs = [evaluate_polynomial(az_i, t) for t in t_vals]
+            x_traj.append(np.column_stack((xs, ys, zs)))  # (m_per_seg,3)
 
-
-        r_inf, s_inf = admm_residuals_cp(Acx, Acy, xi_x, xi_y, z_traj, z_traj_prev, rho, bcx, bcy)
-
+        # Residuen (3D)
+        r_inf, s_inf = admm_residuals_cp_3d(Acx, Acy, Acz, xi_x, xi_y, xi_z,
+                                            z_traj, z_traj_prev, rho, bcx, bcy, bcz)
 
         if k % 1 == 0:
             print(f"resids: r_inf={r_inf:.3e}, s_inf={s_inf:.3e}, rho={rho:.3e}")
@@ -576,7 +565,6 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
                 rho = rho_new
                 rho_cache = None
 
-
         rho_list.append(rho)
 
         # KONVERGENZTEST
@@ -585,94 +573,30 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
         if max_diff < eps:
             print("Konvergenz erreicht.")
-            ax = pdc.visualize_environment(Al=A_list, bl=b_list, p=path_real, planar=True)
 
-            ax.plot(start_xy[0], start_xy[1], 'go', label='Start')
-            ax.plot(goal_xy[0], goal_xy[1], 'bo', label='Goal')
-            ax.plot(obstacles[:, 0], obstacles[:, 1], "o", color="green", label="Bäume")
+            # Concatenate sampled points from all segments -> (N,3) in world coords
+            final_pts = np.vstack(x_traj)  # each element in x_traj is (m_per_seg,3)
+            end_iter = time.perf_counter()
+            print(f"Fertig nach {k+1} Iterationen in {end_iter - start_iter:.2f} Sekunden.")
 
-            
-            # Visualisiere projizierte Kontrollpunkte (Convex-Hull sichtbar)
-            for i in range(S):
-                C = z_traj[ctrl_per_seg*i : ctrl_per_seg*(i+1), :]
-
-                try:
-                    hull = ConvexHull(C)
-                    H = C[hull.vertices]
-                except Exception:
-                    H = C
-                ax.add_patch(MplPolygon(
-                    H, closed=True, facecolor='red', edgecolor='red',
-                    linewidth=edge_lw, alpha=face_alpha, zorder=1
-                ))
-
-                bx, by = bezier_curve_from_cpoints(C, res=res_curve)
-                ax.plot(bx, by, 'r-', linewidth=curve_lw, alpha=0.95,
-                        label='Bézier (projiziert)' if i==0 else "", zorder=2)
-
-
-
-
-            # Aktuelle Trajektorie (bunt)
-            for segment, color in zip(x_traj, colors):
-                ax.plot(segment[:, 0], segment[:, 1], color=color, linewidth=1.5)
-
-            ax.set_title(f"ADMM Iteration {k+1}")
-            ax.set_aspect('equal')
-            ax.grid(True)
-            ax.legend()
-            plt.show()
+            visualize_voxelgrid_with_path(
+                vg,
+                path_xyz=final_pts,          # <-- plot the continuous final path
+                tube_radius=0.25,
+                grid_opacity=0.25,
+                grid_color="blue",
+                turns_idx=None,
+                mark_start_end=True,
+                mark_turns=False,
+                # overlays
+                A_list=A_list,
+                b_list=b_list,
+                show_decomposition=True,
+                decomp_color="yellow",
+                decomp_opacity=0.18,
+                smooth_shading=True,
+            )
             break
-
-        ax = pdc.visualize_environment(Al=A_list, bl=b_list, p=path_real, planar=True)
-
-
-        ax.plot(start_xy[0], start_xy[1], 'go', label='Start')
-        ax.plot(goal_xy[0], goal_xy[1], 'bo', label='Goal')
-        ax.plot(obstacles[:, 0], obstacles[:, 1], "o", color="green", label="Bäume")
-
-        # Visualisiere projizierte Kontrollpunkte (Convex-Hull sichtbar)
-        face_alpha   = 0.12
-        edge_lw      = 1.2
-        curve_lw     = 2.0
-        res_curve    = 900
-
-        for i in range(S):
-            C = z_traj[ctrl_per_seg*i : ctrl_per_seg*(i+1), :]
-
-            try:
-                hull = ConvexHull(C)
-                H = C[hull.vertices]
-            except Exception:
-                H = C
-            ax.add_patch(MplPolygon(
-                H, closed=True, facecolor='red', edgecolor='red',
-                linewidth=edge_lw, alpha=face_alpha, zorder=1
-            ))
-
-            bx, by = bezier_curve_from_cpoints(C, res=res_curve)
-            ax.plot(bx, by, 'r-', linewidth=curve_lw, alpha=0.95,
-                    label='Bézier (projiziert)' if i==0 else "", zorder=2)
-
-
-        # Aktuelle Trajektorie (bunt)
-        for segment, color in zip(x_traj, colors):
-            ax.plot(segment[:, 0], segment[:, 1], color=color, linewidth=1.5)
-
-        ax.set_title(f"ADMM Iteration {k+1}")
-        ax.set_aspect('equal')
-        ax.grid(True)
-        ax.legend()
-
-        iters = np.arange(len(rho_list))
-        ax_rho.plot(iters, rho_list, 'k-', label="ρ")
-        ax_rho.set_xlabel("Iteration")
-        ax_rho.set_ylabel("ρ")
-        ax_rho.grid(True)
-        print(f"Primal {k+1} Dauer: {end_iter - start_iter:.7f} Sekunden")
-        print(f"Projection {k+1} Dauer: {end_proj - start_proj:.7f} Sekunden")
-        plt.pause(0.3)
-        plt.clf()
 
     z_traj_prev = z_traj.copy()
 
