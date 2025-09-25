@@ -338,7 +338,24 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     turns_idx = turns[keep]
 
     if DEBUG:
-        
+        visualize_voxelgrid_with_path(
+            vg,
+            path_idx=path_idx,        # straight line (indices)
+            tube_radius=0.25,
+            grid_opacity=0.25,
+            grid_color="blue",
+            turns_idx=turns_idx,               # optional: or keep your `turns_idx`
+            mark_start_end=False,
+            mark_turns=True,
+            # convex decomposition (half-spaces Ax - b <= 0)
+            A_list=None,
+            b_list=None,
+            show_decomposition=False,
+            decomp_color="yellow",
+            decomp_opacity=0.18,
+            smooth_shading=True,
+        )
+        exit()
     
     occ_idx   = np.argwhere(vg.grid == 1)            # (M,3)
     obs_np    = (occ_idx + 0.5).astype(np.float64)   # (M,3)
@@ -455,9 +472,6 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
     z_traj_prev = z_traj.copy()
 
-    # Farben fürs Plotten belassen
-    colors = cm.viridis(np.linspace(0, 1, S))
-
 
     rho_list = []
 
@@ -529,8 +543,9 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
         # Projektion pro Segment auf EIN Set (Kontrollpunkte)
         C_segments = [X[ctrl_per_seg*i : ctrl_per_seg*(i+1), :] for i in range(S)]  # each (ctrl_per_seg,3)
+        start_proj = time.perf_counter()
         z_traj, assign, _ = project_segments_with_coverage(C_segments, A_list, b_list)  # returns (6S,3)
-
+        end_proj = time.perf_counter()
         # Trajektorie zum Anschauen sampeln (3D)
         x_traj = []
         for i in range(S):
@@ -570,6 +585,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         # KONVERGENZTEST
         max_diff = float(np.max(np.abs(X - z_traj)))
         print(f"Max segment difference: {max_diff:.5f}")
+        print(f"Projektion abgeschlossen in {end_proj - start_proj:.6f} Sekunden.")
 
         if max_diff < eps:
             print("Konvergenz erreicht.")

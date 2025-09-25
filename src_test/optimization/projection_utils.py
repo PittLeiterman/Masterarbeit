@@ -1,4 +1,5 @@
 import numpy as np
+import time
 
 # ---------- 3D: projection of points onto convex polyhedron Ax - b <= 0 ----------
 def project_points_to_polyhedron_pocs(P, A, b, tol=1e-9, max_iters=64):
@@ -63,7 +64,7 @@ def project_segments_with_coverage(C_segments, A_list, b_list):
         costs:  (S, R) cost matrix (sum of squared distances per segment & region)
     """
     import numpy as np
-
+    start = time.perf_counter()
     # Normalize/validate inputs
     C_segments = [np.asarray(C, float).reshape(-1, 3) for C in C_segments]
     S = len(C_segments)
@@ -97,6 +98,9 @@ def project_segments_with_coverage(C_segments, A_list, b_list):
             projs[(i, j)] = P
             costs[i, j] = c
 
+    end = time.perf_counter()
+    
+    startDP = time.perf_counter()
     # ---------- DP over contiguous blocks (same as your 2D code) ----------
     pref_cols = [np.concatenate(([0.0], np.cumsum(costs[:, j], axis=0))) for j in range(R)]
     INF = 1e18
@@ -163,5 +167,9 @@ def project_segments_with_coverage(C_segments, A_list, b_list):
         j = int(assign[i])
         Z_blocks.append(projs[(i, j)])
     Z_traj = np.vstack(Z_blocks).reshape(S * ctrl_per_seg, 3)
+
+    endDP = time.perf_counter()
+    print(f"Proj+costs: {end - start:.6f}s, DP: {endDP - startDP:.6f}s")
+
 
     return Z_traj, assign, costs

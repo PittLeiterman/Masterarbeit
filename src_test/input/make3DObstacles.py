@@ -122,7 +122,7 @@ def load_voxel_grid(path: str, padding: int = 0) -> VoxelGrid:
 # ---------- Hardcoded main ----------
 def main():
     # 🔧 CHANGE THIS PATH to your exported file once
-    path = "input/data/shape_3d_1.txt"
+    path = "input/data/shape_3d_3.txt"
 
     vg = load_voxel_grid(path, padding=0)
     print(f"Origin   : {vg.info.origin}")

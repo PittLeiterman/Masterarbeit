@@ -1,0 +1,14 @@
+{
+    "area_size": [25,25],
+    "shape": "shape_3d_2",
+    "start": [8,5,3],
+    "goal": [35,25,48],
+    "keep": [0, 1, 3, 4, -1],
+    "rho": 0.00001,
+    "max_iters": 200,
+    "eps": 0.1,
+    "v_start": [0.0, 0.0, 0.0],
+    "v_end": [0.0, 0.0, 0.0],
+    "num_segments": 30,
+    "m_per_seg": 30
+}

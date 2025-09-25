@@ -26,6 +26,22 @@ def parse_point(s):
     xyz = tuple(int(round(float(v))) for v in parts)
     return xyz
 
+def parse_xyz_line(line):
+    """
+    Erwartet eine Export-Zeile mit 'x y z' (Leerzeichen-getrennt).
+    Erlaubt auch Kommas/Semikolons/Schrägstriche als Trenner.
+    Leere Zeilen und '#' Kommentare werden ignoriert, dann None.
+    """
+    raw = line.strip()
+    if not raw or raw.startswith("#"):
+        return None
+    for sep in [',', ';', '/']:
+        raw = raw.replace(sep, ' ')
+    parts = [p for p in raw.split() if p]
+    if len(parts) != 3:
+        raise ValueError("Ungültige Zeile (erwarte 3 Werte): " + line.rstrip())
+    return (int(parts[0]), int(parts[1]), int(parts[2]))
+
 def bbox_inclusive(a, b):
     """liefert sortierte inkl. Grenzen für jede Achse"""
     lo = np.minimum(a, b)
@@ -113,6 +129,9 @@ ax_btn_add  = plt.axes([0.47, 0.20, 0.12, 0.065]); btn_add  = Button(ax_btn_add,
 ax_btn_undo = plt.axes([0.47, 0.12, 0.12, 0.065]); btn_undo = Button(ax_btn_undo, "Rückgängig")
 ax_btn_exp  = plt.axes([0.47, 0.04, 0.12, 0.065]); btn_exp  = Button(ax_btn_exp,  "Exportieren")
 
+# Neuer Import-Button (rechts oben über dem Status)
+ax_btn_imp  = plt.axes([0.61, 0.20, 0.12, 0.065]); btn_imp  = Button(ax_btn_imp,  "Importieren")
+
 ax_status = plt.axes([0.62, 0.04, 0.32, 0.22]); ax_status.axis("off")
 status_text = ax_status.text(0, 0.98, "Bereit.", va='top', fontsize=9)
 
@@ -131,6 +150,15 @@ def add_cuboid_wire(lo, hi, facecolor=(0,0,1,0.12), edgecolor=(0,0,0,0.35), line
     poly = Poly3DCollection(faces, facecolors=[facecolor]*6, edgecolors=[edgecolor]*6, linewidths=[linewidth]*6)
     ax.add_collection3d(poly)
     return poly
+
+def add_scatter(points_xyz, size=10, alpha=0.65):
+    """
+    Zeichnet eine 3D-Punktwolke für gegebene (N,3)-Koordinaten.
+    Gibt den Artist zurück (für Undo).
+    """
+    pts = np.asarray(points_xyz, dtype=float)
+    sc = ax.scatter(pts[:,0], pts[:,1], pts[:,2], s=size, alpha=alpha, depthshade=True)
+    return sc
 
 def autoscale_to_occupied():
     if occupied:
@@ -206,6 +234,44 @@ def add_wall_or_volume(p1, p2, mode):
         info = f"Volumen belegt: {len(cells)} Zellen"
     return cells, artists, info
 
+# ----------------- Import-Logik -----------------
+def import_from_file(fname):
+    """
+    Liest eine Export-Datei (Zeilen 'x y z') ein, fügt alle Zellen hinzu
+    und erzeugt eine Visualisierung (Scatter + Hüllquader).
+    Rückgabe: (cells_added_set, artists_list, info_str)
+    """
+    new_cells = set()
+    bad_lines = 0
+    with open(fname, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                xyz = parse_xyz_line(line)
+                if xyz is None:
+                    continue
+                new_cells.add(tuple(xyz))
+            except Exception:
+                bad_lines += 1
+
+    if not new_cells:
+        return set(), [], ("Keine gültigen Zellen gefunden." if bad_lines == 0
+                           else f"Keine gültigen Zellen; fehlerhafte Zeilen: {bad_lines}")
+
+    # Visualisierung der importierten Daten
+    artists = []
+    pts = np.array(list(new_cells))
+    # Punktwolke
+    artists.append(add_scatter(pts, size=10, alpha=0.65))
+    # Hüllquader über den importierten Bereich
+    # lo = pts.min(axis=0)
+    # hi = pts.max(axis=0)
+    # artists.append(add_cuboid_wire(lo, hi, facecolor=(0,0,1,0.10)))
+
+    info = f"Importiert: {len(new_cells)} Zellen"
+    if bad_lines:
+        info += f" (übersprungene Zeilen: {bad_lines})"
+    return new_cells, artists, info
+
 # ----------------- Callbacks -----------------
 def on_add(event):
     try:
@@ -270,9 +336,46 @@ def on_export(event):
     except Exception as e:
         set_status(f"Fehler beim Speichern: {e}")
 
+def on_import(event):
+    # Datei wählen
+    try:
+        root = Tk(); root.withdraw()
+        fname = filedialog.askopenfilename(
+            title="Export-Datei importieren",
+            filetypes=[("Textdatei", "*.txt"), ("Alle Dateien", "*.*")]
+        )
+        root.destroy()
+    except Exception:
+        fname = None
+    if not fname:
+        set_status("Import abgebrochen.")
+        return
+
+    try:
+        cells, artists, info = import_from_file(fname)
+
+        if not cells:
+            # Nichts gültiges gefunden
+            for art in artists:
+                try: art.remove()
+                except Exception: pass
+            set_status(info)
+            return
+
+        # Globale Belegung updaten und History-Eintrag anhängen
+        for c in cells: occupied.add(c)
+        history.append({"cells": cells, "artists": artists})
+
+        autoscale_to_occupied()
+        fig.canvas.draw_idle()
+        set_status(f"{info}: {fname}")
+    except Exception as e:
+        set_status(f"Fehler beim Import: {e}")
+
 btn_add.on_clicked(on_add)
 btn_undo.on_clicked(on_undo)
 btn_exp.on_clicked(on_export)
+btn_imp.on_clicked(on_import)
 
-set_status("Modus wählen (Wand/Volumen) → P1/P2 eingeben → Hinzufügen. Export schreibt alle belegten Zellen (x y z).")
+set_status("Modus wählen (Wand/Volumen) → P1/P2 eingeben → Hinzufügen. Export/Import schreiben/lesen alle belegten Zellen (x y z).")
 plt.show()
