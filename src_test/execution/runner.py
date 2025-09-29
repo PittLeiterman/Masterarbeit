@@ -466,7 +466,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
     # Segmentweise Projektion der Kontrollpunkte in den "besten" Set
     C_segments = [X[ctrl_per_seg*i : ctrl_per_seg*(i+1), :] for i in range(S)]  # X is (6S, 3)
-    z_traj, assign, costs_mat = project_segments_with_coverage(C_segments, A_list, b_list)
+    z_traj, assign, costs_mat = Z_traj, assign, costs = project_segments_with_coverage(C_segments, A_list, b_list, tol=1e-9, max_as_iters=8, warm_active_seq=True)
     u_traj = np.zeros_like(z_traj)
 
 
@@ -544,7 +544,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         # Projektion pro Segment auf EIN Set (Kontrollpunkte)
         C_segments = [X[ctrl_per_seg*i : ctrl_per_seg*(i+1), :] for i in range(S)]  # each (ctrl_per_seg,3)
         start_proj = time.perf_counter()
-        z_traj, assign, _ = project_segments_with_coverage(C_segments, A_list, b_list)  # returns (6S,3)
+        z_traj, assign, _ = Z_traj, assign, costs = project_segments_with_coverage(C_segments, A_list, b_list, tol=1e-9, max_as_iters=8, warm_active_seq=True)
         end_proj = time.perf_counter()
         # Trajektorie zum Anschauen sampeln (3D)
         x_traj = []
