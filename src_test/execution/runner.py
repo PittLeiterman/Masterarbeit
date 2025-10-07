@@ -496,7 +496,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     start_iter = time.perf_counter()
     for k in range(max_iters):
         print(f"--- Iteration {k+1} ---")
-
+        step1_start = time.perf_counter()
         # --- Build ZU ---
         if k == 0:
             z_traj_prev = z_traj.copy()
@@ -540,32 +540,22 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         X  = np.column_stack([Cx, Cy, Cz])
 
         z_traj_prev = z_traj.copy()
-
+        step1_end = time.perf_counter()
+        step2_start = time.perf_counter()
         # Projektion pro Segment auf EIN Set (Kontrollpunkte)
         C_segments = [X[ctrl_per_seg*i : ctrl_per_seg*(i+1), :] for i in range(S)]  # each (ctrl_per_seg,3)
         start_proj = time.perf_counter()
         z_traj, assign, _ = Z_traj, assign, costs = project_segments_with_coverage(C_segments, A_list, b_list, tol=1e-9, max_as_iters=8, warm_active_seq=True)
         end_proj = time.perf_counter()
         # Trajektorie zum Anschauen sampeln (3D)
-        x_traj = []
-        for i in range(S):
-            dt = segment_times[i+1] - segment_times[i]
-            t_vals = np.linspace(0, dt, m_per_seg)
-            ax_i = coeffs_x[i].value
-            ay_i = coeffs_y[i].value
-            az_i = coeffs_z[i].value
-            xs = [evaluate_polynomial(ax_i, t) for t in t_vals]
-            ys = [evaluate_polynomial(ay_i, t) for t in t_vals]
-            zs = [evaluate_polynomial(az_i, t) for t in t_vals]
-            x_traj.append(np.column_stack((xs, ys, zs)))  # (m_per_seg,3)
-
+        
+        step2_end = time.perf_counter()
+        step3_start = time.perf_counter()
         # Residuen (3D)
         r_inf, s_inf = admm_residuals_cp_3d(Acx, Acy, Acz, xi_x, xi_y, xi_z,
                                             z_traj, z_traj_prev, rho, bcx, bcy, bcz)
 
-        if k % 1 == 0:
-            print(f"resids: r_inf={r_inf:.3e}, s_inf={s_inf:.3e}, rho={rho:.3e}")
-
+        
         # Dual update (scaled)
         u_traj = u_traj + (X - z_traj)
 
@@ -581,19 +571,34 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
                 rho_cache = None
 
         rho_list.append(rho)
+        step3_end = time.perf_counter()
 
         # KONVERGENZTEST
         max_diff = float(np.max(np.abs(X - z_traj)))
-        print(f"Max segment difference: {max_diff:.5f}")
-        print(f"Projektion abgeschlossen in {end_proj - start_proj:.6f} Sekunden.")
-
+        # print(f"Projektion abgeschlossen in {end_proj - start_proj:.6f} Sekunden.")
+        print(f"Schritte: Step1 {step1_end - step1_start:.5f}s, Step2 {step2_end - step2_start:.5f}s, Step3 {step3_end - step3_start:.5f}s")
+        #print total iteration time
+        print(f"Iteration {k+1} in : {step3_end - step1_start:.5f}s abgeschlossen")
         if max_diff < eps:
             print("Konvergenz erreicht.")
+            end_iter = time.perf_counter()
+            print(f"Fertig nach {k+1} Iterationen in {end_iter - start_iter:.2f} Sekunden.")
+
+            x_traj = []
+            for i in range(S):
+                dt = segment_times[i+1] - segment_times[i]
+                t_vals = np.linspace(0, dt, m_per_seg)
+                ax_i = coeffs_x[i].value
+                ay_i = coeffs_y[i].value
+                az_i = coeffs_z[i].value
+                xs = [evaluate_polynomial(ax_i, t) for t in t_vals]
+                ys = [evaluate_polynomial(ay_i, t) for t in t_vals]
+                zs = [evaluate_polynomial(az_i, t) for t in t_vals]
+                x_traj.append(np.column_stack((xs, ys, zs)))  # (m_per_seg,3)
 
             # Concatenate sampled points from all segments -> (N,3) in world coords
             final_pts = np.vstack(x_traj)  # each element in x_traj is (m_per_seg,3)
-            end_iter = time.perf_counter()
-            print(f"Fertig nach {k+1} Iterationen in {end_iter - start_iter:.2f} Sekunden.")
+        
 
             visualize_voxelgrid_with_path(
                 vg,
