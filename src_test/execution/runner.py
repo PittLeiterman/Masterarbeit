@@ -466,7 +466,8 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
     # Segmentweise Projektion der Kontrollpunkte in den "besten" Set
     C_segments = [X[ctrl_per_seg*i : ctrl_per_seg*(i+1), :] for i in range(S)]  # X is (6S, 3)
-    z_traj, assign, costs_mat = Z_traj, assign, costs = project_segments_with_coverage(C_segments, A_list, b_list, tol=1e-9, max_as_iters=8, warm_active_seq=True)
+    Z_traj, _, _ = project_segments_with_coverage(C_segments, A_list, b_list, tol=1e-9, max_as_iters=8, warm_active_seq=True)
+    z_traj = Z_traj
     u_traj = np.zeros_like(z_traj)
 
 
@@ -545,7 +546,8 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         # Projektion pro Segment auf EIN Set (Kontrollpunkte)
         C_segments = [X[ctrl_per_seg*i : ctrl_per_seg*(i+1), :] for i in range(S)]  # each (ctrl_per_seg,3)
         start_proj = time.perf_counter()
-        z_traj, assign, _ = Z_traj, assign, costs = project_segments_with_coverage(C_segments, A_list, b_list, tol=1e-9, max_as_iters=8, warm_active_seq=True)
+        Z_traj, _ , _ = project_segments_with_coverage(C_segments, A_list, b_list, tol=1e-9, max_as_iters=8, warm_active_seq=True)
+        z_traj = Z_traj
         end_proj = time.perf_counter()
         # Trajektorie zum Anschauen sampeln (3D)
         
@@ -582,7 +584,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         if max_diff < eps:
             print("Konvergenz erreicht.")
             end_iter = time.perf_counter()
-            print(f"Fertig nach {k+1} Iterationen in {end_iter - start_iter:.2f} Sekunden.")
+            print(f"Fertig nach {k+1} Iterationen in {end_iter - start_iter:.5f} Sekunden.")
 
             x_traj = []
             for i in range(S):

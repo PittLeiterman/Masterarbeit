@@ -1,5 +1,6 @@
 import numpy as np
 import time
+from numba import njit, prange
 
 # ------------------------------------------------------------
 # 3D Active-Set-Projektion: exakte Projektion auf Ax <= b
@@ -104,6 +105,40 @@ def _proj_point_qp3d(p, A, b, tol=1e-9, max_as_iters=8, warm_active=None):
     return x, d2, tuple(I)
 
 
+@njit(cache=True, fastmath=True, inline='always')
+def _chol3_solve_sym(G00,G01,G02,G11,G12,G22, r0,r1,r2):
+    # Cholesky for symmetric positive (semi)definite 3x3.
+    eps = 1e-15
+    L00 = (G00 + eps)**0.5
+    L10 = G01 / L00
+    L20 = G02 / L00
+    L11 = (G11 - L10*L10 + eps)**0.5
+    L21 = (G12 - L20*L10) / L11
+    L22 = (G22 - L20*L20 - L21*L21 + eps)**0.5
+    # forward
+    y0 = r0 / L00
+    y1 = (r1 - L10*y0) / L11
+    y2 = (r2 - L20*y0 - L21*y1) / L22
+    # backward
+    x2 = y2 / L22
+    x1 = (y1 - L21*x2) / L11
+    x0 = (y0 - L10*x1 - L20*x2) / L00
+    return x0, x1, x2
+
+@njit(cache=True, fastmath=True, parallel=True, nogil=True)
+def _costs_for_region_costonly(C_stack, A, b, tol=1e-9, max_as_iters=8):
+    S = C_stack.shape[0]
+    costs = np.empty(S, dtype=np.float64)
+    for i in prange(S):
+        P = C_stack[i]
+        s = 0.0
+        for t in range(P.shape[0]):
+            x0,x1,x2,di2,_,_,_ = qp3d_point_njit(P[t], A, b, tol, max_as_iters, -1, -1, -1)
+            s += di2
+        costs[i] = s
+    return costs
+
+
 def project_points_to_polyhedron_qp3d(P, A, b, tol=1e-9, max_as_iters=8, warm_active_seq=False):
     """
     Vectorized wrapper über Punkte (N,3).
@@ -159,7 +194,7 @@ def project_segments_with_coverage(C_segments, A_list, b_list, *,
     start_total = time.perf_counter()
 
     # Normalize
-    C_segments = [np.asarray(C, float).reshape(-1, 3) for C in C_segments]
+    C_segments_arr = np.ascontiguousarray(np.stack(C_segments, axis=0))
     S = len(C_segments)
     R = len(A_list)
     if S < R:
@@ -172,27 +207,21 @@ def project_segments_with_coverage(C_segments, A_list, b_list, *,
     # Clean A/b pro Region
     Ab = []
     for A, b in zip(A_list, b_list):
-        A = np.asarray(A, float); b = np.asarray(b, float).reshape(-1)
+        A = np.asarray(A, np.float64); b = np.asarray(b, np.float64).reshape(-1)
         active = ~np.all(np.isclose(A, 0.0, atol=1e-12), axis=1)
         A = A[active]; b = b[active]
-        Ab.append((A, b))
+        if A.shape[0] > 0:
+            nrm = np.linalg.norm(A, axis=1)
+            nrm[nrm < 1e-18] = 1.0
+            A = A / nrm[:,None]
+            b = b / nrm
+        Ab.append((np.ascontiguousarray(A), np.ascontiguousarray(b)))
 
     # ---- 1) Kosten berechnen (ohne Projektionen puffern)
     t0 = time.perf_counter()
-    costs = np.zeros((S, R), dtype=float)
+    costs = np.empty((S, R), dtype=np.float64)
     for j, (A, b) in enumerate(Ab):
-        warm_active = None
-        for i, C in enumerate(C_segments):
-            if A.shape[0] == 0:
-                c = 0.0
-                warm_active = None
-            else:
-                # Nur Kosten (Summe d²), optional Warm-start entlang der Segmente
-                X, d2, _ = project_points_to_polyhedron_qp3d_numba(
-                    C, A, b, tol=tol, max_as_iters=max_as_iters, warm_active_seq=warm_active_seq
-                )
-                c = float(np.sum(d2))
-            costs[i, j] = c
+        costs[:, j] = _costs_for_region_costonly(C_segments_arr, A, b, tol=tol, max_as_iters=max_as_iters)
     t1 = time.perf_counter()
 
     # ---- 2) DP (unverändert, aber ohne projs-Speicher)
@@ -370,7 +399,6 @@ def _solve3(G, r):
     # Back-substitute
     A[1,3] -= A[1,2]*A[2,3]; A[1,2]=0.0
     A[0,3] -= A[0,2]*A[2,3]; A[0,2]=0.0
-    A[0,3] -= A[0,2]*A[2,3]
     return A[0,3], A[1,3], A[2,3]
 
 @njit(cache=True, fastmath=True)
@@ -455,23 +483,25 @@ def qp3d_point_njit(p, A, b, tol=1e-9, max_as_iters=8, warm0=-1, warm1=-1, warm2
         else:
             # k == 3
             i0,i1,i2 = idx[0], idx[1], idx[2]
-            AIt = np.empty((3,3))
-            AIt[0,0]=A[i0,0]; AIt[0,1]=A[i0,1]; AIt[0,2]=A[i0,2]
-            AIt[1,0]=A[i1,0]; AIt[1,1]=A[i1,1]; AIt[1,2]=A[i1,2]
-            AIt[2,0]=A[i2,0]; AIt[2,1]=A[i2,1]; AIt[2,2]=A[i2,2]
-            rhs = np.empty(3)
-            rhs[0] = AIt[0,0]*p[0] + AIt[0,1]*p[1] + AIt[0,2]*p[2] - b[i0]
-            rhs[1] = AIt[1,0]*p[0] + AIt[1,1]*p[1] + AIt[1,2]*p[2] - b[i1]
-            rhs[2] = AIt[2,0]*p[0] + AIt[2,1]*p[1] + AIt[2,2]*p[2] - b[i2]
-            G = np.empty((3,3))
-            # G = A_I A_I^T
-            for r in range(3):
-                for c in range(3):
-                    G[r,c] = (AIt[r,0]*AIt[c,0] + AIt[r,1]*AIt[c,1] + AIt[r,2]*AIt[c,2])
-            G[0,0]+=1e-15; G[1,1]+=1e-15; G[2,2]+=1e-15
-            l0,l1,l2 = _solve3(G, rhs)
+            a00,a01,a02 = A[i0,0],A[i0,1],A[i0,2]
+            a10,a11,a12 = A[i1,0],A[i1,1],A[i1,2]
+            a20,a21,a22 = A[i2,0],A[i2,1],A[i2,2]
+            b0 = b[i0]; b1 = b[i1]; b2 = b[i2]
+
+            r0 = a00*p[0] + a01*p[1] + a02*p[2] - b0
+            r1 = a10*p[0] + a11*p[1] + a12*p[2] - b1
+            r2 = a20*p[0] + a21*p[1] + a22*p[2] - b2
+
+            G00 = a00*a00 + a01*a01 + a02*a02 + 1e-15
+            G01 = a00*a10 + a01*a11 + a02*a12
+            G02 = a00*a20 + a01*a21 + a02*a22
+            G11 = a10*a10 + a11*a11 + a12*a12 + 1e-15
+            G12 = a10*a20 + a11*a21 + a12*a22
+            G22 = a20*a20 + a21*a21 + a22*a22 + 1e-15
+
+            l0,l1,l2 = _chol3_solve_sym(G00,G01,G02,G11,G12,G22, r0,r1,r2)
+
             if l0 < -1e-12 or l1 < -1e-12 or l2 < -1e-12:
-                # Drop most negative
                 mn = l0; pos = 0
                 if l1 < mn: mn=l1; pos=1
                 if l2 < mn: mn=l2; pos=2
@@ -479,9 +509,10 @@ def qp3d_point_njit(p, A, b, tol=1e-9, max_as_iters=8, warm0=-1, warm1=-1, warm2
                 elif pos == 1: I1 = I2; I2 = -1
                 else: I2 = -1
                 continue
-            x0 = p[0] - (AIt[0,0]*l0 + AIt[1,0]*l1 + AIt[2,0]*l2)
-            x1 = p[1] - (AIt[0,1]*l0 + AIt[1,1]*l1 + AIt[2,1]*l2)
-            x2 = p[2] - (AIt[0,2]*l0 + AIt[1,2]*l1 + AIt[2,2]*l2)
+
+            x0 = p[0] - (a00*l0 + a10*l1 + a20*l2)
+            x1 = p[1] - (a01*l0 + a11*l1 + a21*l2)
+            x2 = p[2] - (a02*l0 + a12*l1 + a22*l2)
 
         # Check globale Feasibility
         vmax = -1e30; imax = -1

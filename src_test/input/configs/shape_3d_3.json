@@ -4,11 +4,11 @@
     "start": [8,5,3],
     "goal": [35,25,48],
     "keep": [0, 2, 3, 4, 7, 8, -1],
-    "rho": 0.00001,
+    "rho": 0.0001,
     "max_iters": 200,
     "eps": 0.01,
     "v_start": [0.0, 0.0, 0.0],
     "v_end": [0.0, 0.0, 0.0],
-    "num_segments": 40,
+    "num_segments": 30,
     "m_per_seg": 30
 }
