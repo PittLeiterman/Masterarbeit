@@ -356,12 +356,13 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
             smooth_shading=True,
         )
         exit()
+
+    origin = np.asarray(vg.info.origin, dtype=float)
     
     occ_idx   = np.argwhere(vg.grid == 1)            # (M,3)
-    obs_np    = (occ_idx + 0.5).astype(np.float64)   # (M,3)
+    obs_np    = (occ_idx + 0.5).astype(np.float64) + origin   # <- add origin
 
-    # Path as voxel-center indices
-    path_np   = (np.asarray(turns_idx, float) + 0.5)  # (K,3)
+    path_np   = (np.asarray(turns_idx, float) + 0.5) + origin 
 
     # Local bbox in index units (size of a voxel == 1)
     box_np    = np.array([[5.0, 5.0, 5.0]], dtype=np.float64)  # (1,3)
@@ -381,7 +382,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
     # -------- (1) Knot positions: straight line from start -> goal --------
     S = int(num_segments)
-    init_path = straight_line_path_3d(start_idx, goal_idx, S + 1, center_offsets=True)  # (S+1, 3)
+    init_path = straight_line_path_3d(start_idx, goal_idx, S + 1, center_offsets=True) + origin  # (S+1, 3)
 
     # Split per-axis if you still need individual arrays downstream
     p_all_x = init_path[:, 0]
@@ -478,7 +479,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
     visualize_voxelgrid_with_path(
         vg,
-        path_idx=init_path,        # straight line (indices)
+        path_xyz=init_path,        # straight line (indices)
         tube_radius=0.25,
         grid_opacity=0.25,
         grid_color="blue",
