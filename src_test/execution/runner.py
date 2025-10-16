@@ -46,6 +46,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         vg,
         path_idx=None,
         path_xyz=None,
+        plotPath=True,
         tube_radius=0.2,
         grid_opacity=0.25,
         grid_color="blue",
@@ -91,7 +92,8 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
         if centers is not None and centers.shape[0] >= 2:
             line = pv.Spline(centers, n_points=len(centers))
-            p.add_mesh(line.tube(radius=tube_radius, n_sides=16), color="red")
+            if plotPath:
+                p.add_mesh(line.tube(radius=tube_radius, n_sides=16), color="red")
 
             if mark_start_end:
                 p.add_mesh(pv.Sphere(radius=tube_radius*turn_scale, center=centers[0]),  color="green")
@@ -341,11 +343,12 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         visualize_voxelgrid_with_path(
             vg,
             path_idx=path_idx,        # straight line (indices)
+            plotPath=True,
             tube_radius=0.25,
             grid_opacity=0.25,
             grid_color="blue",
             turns_idx=turns_idx,               # optional: or keep your `turns_idx`
-            mark_start_end=False,
+            mark_start_end=True,
             mark_turns=True,
             # convex decomposition (half-spaces Ax - b <= 0)
             A_list=None,
@@ -480,6 +483,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     visualize_voxelgrid_with_path(
         vg,
         path_xyz=init_path,        # straight line (indices)
+        plotPath=True,
         tube_radius=0.25,
         grid_opacity=0.25,
         grid_color="blue",
