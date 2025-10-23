@@ -182,7 +182,7 @@ def project_points_to_polyhedron_qp3d(P, A, b, tol=1e-9, max_as_iters=8, warm_ac
 # ------------------------------------------------------------
 def project_segments_with_coverage(C_segments, A_list, b_list, *,
                                    tol=1e-9, max_as_iters=8,
-                                   warm_active_seq=True, verbose_timing=True):
+                                   warm_active_seq=True, verbose_timing=False):
     """
     C_segments: list of (ctrl_per_seg,3)
     A_list/b_list: pro Region
@@ -333,7 +333,13 @@ def project_segments_with_coverage(C_segments, A_list, b_list, *,
     if verbose_timing:
         print(f"Costs-only pass: {t1 - t0:.6f}s | DP: {t_dp1 - t_dp0:.6f}s | Re-proj assigned: {t3 - t2:.6f}s | Total: {time.perf_counter() - start_total:.6f}s")
 
-    return Z_traj, assign, costs
+    timings = {
+        "proj_costs_only": t1 - t0,
+        "proj_dp": t_dp1 - t_dp0,
+        "proj_reproj": t3 - t2,
+        "proj_total": time.perf_counter() - start_total,
+    }
+    return Z_traj, assign, costs, timings
 
 
 from numba import njit, prange

@@ -76,11 +76,6 @@ def astar_3d(grid: np.ndarray,
              start_idx: Tuple[int,int,int],
              goal_idx: Tuple[int,int,int],
              connectivity: int = 6) -> Optional[List[Tuple[int,int,int]]]:
-    """
-    grid: bool array [nx,ny,nz], True=occupied
-    start_idx/goal_idx: integer grid indices (i,j,k)
-    returns list of indices from start to goal (inclusive) or None
-    """
     nx, ny, nz = grid.shape
     in_bounds = lambda n: (0 <= n[0] < nx and 0 <= n[1] < ny and 0 <= n[2] < nz)
     is_free = lambda n: in_bounds(n) and (not grid[n])
@@ -89,45 +84,58 @@ def astar_3d(grid: np.ndarray,
         return None
 
     steps = neighbor_steps(connectivity)
-    # movement costs: 1 for axis, sqrt(2) for edge, sqrt(3) for corner
+
     def step_cost(d):
         ax = abs(d[0]) + abs(d[1]) + abs(d[2])
         return 1.0 if ax == 1 else (2**0.5 if ax == 2 else 3**0.5)
 
-    open_heap: List[Tuple[float, Tuple[int,int,int]]] = []
-    heapq.heappush(open_heap, (0.0, start_idx))
-    g_score: Dict[Tuple[int,int,int], float] = {start_idx: 0.0}
-    came_from: Dict[Tuple[int,int,int], Tuple[int,int,int]] = {}
+    # NEW: forbid corner-cutting for 18/26
+    def traversable(cur, d):
+        n = (cur[0]+d[0], cur[1]+d[1], cur[2]+d[2])
+        if not is_free(n):
+            return False
+        ax = abs(d[0]) + abs(d[1]) + abs(d[2])
+        if ax >= 2:  # edge or corner move
+            # require all relevant face-adjacent cells to be free
+            checks = []
+            if d[0] != 0: checks.append((cur[0]+d[0], cur[1], cur[2]))
+            if d[1] != 0: checks.append((cur[0], cur[1]+d[1], cur[2]))
+            if d[2] != 0: checks.append((cur[0], cur[1], cur[2]+d[2]))
+            for c in checks:
+                if not is_free(c):
+                    return False
+        return True
 
-    h0 = heuristic(start_idx, goal_idx, connectivity)
-    f_score: Dict[Tuple[int,int,int], float] = {start_idx: h0}
+    open_heap = []
+    heapq.heappush(open_heap, (0.0, start_idx))
+    g_score = {start_idx: 0.0}
+    came_from = {}
+    f_score = {start_idx: heuristic(start_idx, goal_idx, connectivity)}
 
     while open_heap:
         _, current = heapq.heappop(open_heap)
         if current == goal_idx:
-            # reconstruct
             path = [current]
             while current in came_from:
                 current = came_from[current]
                 path.append(current)
-            path.reverse()
-            return path
+            return list(reversed(path))
 
         gi = g_score[current]
         for d in steps:
-            n = (current[0]+d[0], current[1]+d[1], current[2]+d[2])
-            if not is_free(n):
+            if not traversable(current, d):
                 continue
+            n = (current[0]+d[0], current[1]+d[1], current[2]+d[2])
             cand = gi + step_cost(d)
             if cand < g_score.get(n, float("inf")):
                 came_from[n] = current
                 g_score[n] = cand
                 f = cand + heuristic(n, goal_idx, connectivity)
-                f_prev = f_score.get(n, float("inf"))
-                if f < f_prev:
+                if f < f_score.get(n, float("inf")):
                     f_score[n] = f
                     heapq.heappush(open_heap, (f, n))
     return None
+
 
 
 # ---------- Visualization with PyVista ----------

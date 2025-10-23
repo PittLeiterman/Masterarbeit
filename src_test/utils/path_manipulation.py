@@ -168,7 +168,7 @@ def upsample_path_3d(path, num_points):
 import numpy as np
 from typing import List, Sequence
 
-def _unique_consecutive(points: Sequence) -> (List, List[int]):
+def _unique_consecutive(points: Sequence) -> (List, List[int]): # type: ignore
     """
     Entfernt direkt aufeinanderfolgende Duplikate, liefert (gefilterte_punkte, index_mapping).
     index_mapping[i] = Originalindex im Eingabepfad für den i-ten gefilterten Punkt.
@@ -201,3 +201,128 @@ def keep_turns_np(points_np: np.ndarray) -> np.ndarray:
     keep_idx = np.concatenate([[0], 1 + np.flatnonzero(turns_mask), [pts.shape[0]-1]])
     return pts[keep_idx]
 
+import numpy as np
+
+def line_of_sight_free(grid: np.ndarray,
+                       a_idx: tuple[int,int,int],
+                       b_idx: tuple[int,int,int],
+                       clearance: int = 0) -> bool:
+    """
+    Returns True iff the straight segment from voxel a_idx -> b_idx is entirely in free space.
+    - grid: bool occupancy (nx,ny,nz), True = occupied
+    - a_idx, b_idx: integer voxel indices (i,j,k)
+    - clearance: inflate obstacles by this many voxels (0 = exact)
+
+    Uses Amanatides & Woo 3D DDA from voxel centers (idx + 0.5).
+    Conservative: any visited voxel that is occupied -> no LoS.
+    """
+    nx, ny, nz = grid.shape
+
+    # Optional: obstacle inflation for clearance (no SciPy needed)
+    if clearance > 0:
+        from numpy.lib.stride_tricks import sliding_window_view
+        pad = clearance
+        g = np.pad(grid, pad, mode="edge")
+        # box dilation of size (2c+1)^3
+        win = sliding_window_view(g, (2*pad+1, 2*pad+1, 2*pad+1))
+        grid = (win.any(axis=(3,4,5)))
+        # grid now shrunk back to original shape
+
+    def inb(i,j,k): return (0<=i<nx and 0<=j<ny and 0<=k<nz)
+
+    ax, ay, az = map(int, a_idx)
+    bx, by, bz = map(int, b_idx)
+    if not (inb(ax,ay,az) and inb(bx,by,bz)):
+        return False
+    if grid[ax,ay,az] or grid[bx,by,bz]:
+        return False
+
+    # Start/end at centers
+    p0 = np.array([ax+0.5, ay+0.5, az+0.5], dtype=float)
+    p1 = np.array([bx+0.5, by+0.5, bz+0.5], dtype=float)
+    d  = p1 - p0
+
+    # Handle degenerate case
+    if np.allclose(d, 0.0):
+        return True
+
+    # Current voxel
+    vx, vy, vz = ax, ay, az
+
+    # Step (+1, 0, or -1) per axis
+    step = np.sign(d).astype(int)
+    step[abs(d) < 1e-15] = 0
+
+    # tMax: distance to the first voxel boundary along each axis (parametric t in [0,1])
+    # tDelta: distance between crossings along each axis
+    tMax = np.zeros(3, dtype=float)
+    tDelta = np.empty(3, dtype=float)
+    for i, (pi, di, vi, si) in enumerate(zip(p0, d, (vx,vy,vz), step)):
+        if si > 0:
+            next_boundary = vi + 1.0  # right/top/front face
+            tMax[i] = (next_boundary - pi) / di
+            tDelta[i] = 1.0 / di
+        elif si < 0:
+            next_boundary = vi * 1.0  # left/bottom/back face
+            tMax[i] = (next_boundary - pi) / di
+            tDelta[i] = -1.0 / di
+        else:
+            tMax[i] = np.inf
+            tDelta[i] = np.inf
+
+    # Traverse until we reach the target voxel
+    # We visit the starting voxel first (already checked), then step axis whose tMax is smallest.
+    while (vx,vy,vz) != (bx,by,bz):
+        # advance along the min tMax axis (ties are fine: pick one)
+        axis = int(np.argmin(tMax))
+        if not np.isfinite(tMax[axis]):
+            # direction is zero along this axis and we can't progress toward the target
+            return False
+        # step in that axis
+        if axis == 0:
+            vx += step[0]
+        elif axis == 1:
+            vy += step[1]
+        else:
+            vz += step[2]
+        tMax[axis] += tDelta[axis]
+
+        if not inb(vx,vy,vz):
+            return False
+        if grid[vx,vy,vz]:
+            return False
+
+    return True
+
+
+
+def reduce_turns_by_los(turns_idx: np.ndarray,
+                        grid: np.ndarray,
+                        clearance: int = 0) -> np.ndarray:
+    """
+    Greedy "string-pulling" over the turn list:
+    keep turns only where necessary to maintain free line of sight.
+    - turns_idx: (T,3) int array of A* turns (includes start and goal)
+    - returns a subset (K,3) with K <= T, preserving order
+    """
+    T = np.asarray(turns_idx, dtype=int)
+    if T.ndim != 2 or T.shape[1] != 3 or T.shape[0] <= 2:
+        return T  # nothing to do (must include start & goal)
+
+    kept = [T[0]]
+    i = 0
+    N = T.shape[0]
+
+    while True:
+        # push j as far as LoS allows from i
+        j = i + 1
+        last_good = i + 1
+        while j < N and line_of_sight_free(grid, tuple(T[i]), tuple(T[j]), clearance=clearance):
+            last_good = j
+            j += 1
+        kept.append(T[last_good])
+        if last_good == N - 1:
+            break
+        i = last_good
+
+    return np.asarray(kept, dtype=int)

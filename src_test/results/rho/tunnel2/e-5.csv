@@ -1,0 +1,2 @@
+shape,start,goal,num_segments_cfg,m_per_seg,rho_init,eps,max_iters,iters,mean_step1_s,mean_step2_s,mean_step3_s,mean_iter_total_s,mean_proj_costs_only_s,mean_proj_dp_s,mean_proj_reproj_s,mean_proj_total_s,success
+tunnel2,"(0, 0, 0)","(20, 20, 20)",60,30,1e-05,0.01,4000,14,0.0005816873661907655,0.0008090892224572599,7.375004601531796e-05,0.0014647232185650086,0.0002846429373935929,0.00014025891765153835,0.00020711280272475312,0.0007720178442208894,0

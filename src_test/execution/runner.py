@@ -1,7 +1,9 @@
 def run_admm_trajectory_optimization(config, DEBUG=False):    
     from input.make3DObstacles import load_voxel_grid   # or: from voxel_grid import load_voxel_grid
     from pathfinder.AStar3D import astar_3d
-    from utils.path_manipulation import simplify_path_3d, keep_turns_np
+    from utils.path_manipulation import keep_turns_np, reduce_turns_by_los
+    import os
+    import csv
 
     from optimization.primal_step import evaluate_polynomial
 
@@ -16,12 +18,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
     import pydecomp as pdc
     import numpy as np
-    import matplotlib.pyplot as plt
-    import matplotlib.cm as cm
     import pyvista as pv
-
-    from scipy.spatial import ConvexHull
-    from matplotlib.patches import Polygon as MplPolygon
     from math import comb
 
     import time
@@ -257,20 +254,28 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         return pts[:,0], pts[:,1]
 
 
-    def admm_residuals_cp_3d(Acx, Acy, Acz, xi_x, xi_y, xi_z, Z, Z_prev, rho, bcx, bcy, bcz):
-        """Infinity-norm primal/dual residuals for 3 axes."""
-        xi_x = np.asarray(xi_x).ravel(); xi_y = np.asarray(xi_y).ravel(); xi_z = np.asarray(xi_z).ravel()
-        rx = Acx @ xi_x + bcx - Z[:, 0]
-        ry = Acy @ xi_y + bcy - Z[:, 1]
-        rz = Acz @ xi_z + bcz - Z[:, 2]
+    def admm_residuals_cp_3d_from_C(Cx, Cy, Cz, Z, Z_prev, Acx, Acy, Acz, rho):
+        # Primal
+        rx = Cx - Z[:, 0]
+        ry = Cy - Z[:, 1]
+        rz = Cz - Z[:, 2]
         r_inf = max(np.linalg.norm(rx, np.inf), np.linalg.norm(ry, np.inf), np.linalg.norm(rz, np.inf))
 
+        # Dual
         dZ = Z - Z_prev
         sx = rho * (Acx.T @ dZ[:, 0])
         sy = rho * (Acy.T @ dZ[:, 1])
         sz = rho * (Acz.T @ dZ[:, 2])
         s_inf = max(np.linalg.norm(sx, np.inf), np.linalg.norm(sy, np.inf), np.linalg.norm(sz, np.inf))
-        return r_inf, s_inf
+
+        # Skalen
+        scale_pri  = max(np.linalg.norm(Cx, np.inf), np.linalg.norm(Cy, np.inf),
+                        np.linalg.norm(Cz, np.inf), np.max(np.abs(Z)))
+        scale_dual = s_inf
+
+        return r_inf, s_inf, scale_pri, scale_dual
+
+
 
 
     def update_rho_osqp_with_s_cp(rho, r_inf, s_inf,
@@ -301,7 +306,24 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     v_end = tuple(config["v_end"])
     num_segments = config.get("num_segments")
     m_per_seg = int(config.get("m_per_seg", 10))
+    runtime_summary_csv = config.get("runtime_summary_csv", "results/runtime_summary.csv")
+    eps_abs_pri  = float(config.get("eps_abs_pri", 1e-4))
+    eps_abs_dual = float(config.get("eps_abs_dual", 1e-4))
+    eps_rel      = float(config.get("eps_rel",     1e-3))
 
+    os.makedirs(os.path.dirname(runtime_summary_csv), exist_ok=True)
+    runtime_rows = []
+
+    summary_meta = {
+        "shape": shape,
+        "start": start,
+        "goal": goal,
+        "num_segments_cfg": int(num_segments),  # from config
+        "m_per_seg": int(m_per_seg),
+        "rho_init": float(rho),
+        "eps": float(eps),
+        "max_iters": int(max_iters),
+    }
 
     # Baum- und Grid-Erzeugung
     vg = load_voxel_grid(f"input/data/{shape}.txt", padding=0)
@@ -324,7 +346,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         raise ValueError(f"Goal is inside an obstacle: {goal} (idx {goal_idx})")
 
 
-    CONNECTIVITY = 6   # or 18 / 26 if you want diagonals
+    CONNECTIVITY = 18   # or 18 / 26 if you want diagonals
     path_idx = astar_3d(grid3d, start_idx, goal_idx, connectivity=CONNECTIVITY)
 
 
@@ -337,7 +359,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     print(f"Pfad gefunden")
     # Pfad Vereinfachung
     turns = np.asarray(keep_turns_np(path_idx))
-    turns_idx = turns[keep]
+    turns_idx = reduce_turns_by_los(turns, grid3d, clearance=0)
 
     if DEBUG:
         visualize_voxelgrid_with_path(
@@ -470,7 +492,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
     # Segmentweise Projektion der Kontrollpunkte in den "besten" Set
     C_segments = [X[ctrl_per_seg*i : ctrl_per_seg*(i+1), :] for i in range(S)]  # X is (6S, 3)
-    Z_traj, _, _ = project_segments_with_coverage(C_segments, A_list, b_list, tol=1e-9, max_as_iters=8, warm_active_seq=True)
+    Z_traj, _, _ , proj_timings_init = project_segments_with_coverage(C_segments, A_list, b_list, tol=1e-9, max_as_iters=8, warm_active_seq=True)
     z_traj = Z_traj
     u_traj = np.zeros_like(z_traj)
 
@@ -498,6 +520,41 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         decomp_opacity=0.18,
         smooth_shading=True,
     )
+
+    agg = {
+        "sum_step1": 0.0,
+        "sum_step2": 0.0,
+        "sum_step3": 0.0,
+        "sum_iter_total": 0.0,
+        "sum_proj_costs_only": 0.0,
+        "sum_proj_dp": 0.0,
+        "sum_proj_reproj": 0.0,
+        "sum_proj_total": 0.0,
+        "iters": 0,
+    }
+
+    def _write_summary_csv(path, agg, success_flag, meta):
+        if agg["iters"] == 0:
+            return
+        means = {
+            "mean_step1_s":           agg["sum_step1"] / agg["iters"],
+            "mean_step2_s":           agg["sum_step2"] / agg["iters"],
+            "mean_step3_s":           agg["sum_step3"] / agg["iters"],
+            "mean_iter_total_s":      agg["sum_iter_total"] / agg["iters"],
+            "mean_proj_costs_only_s": agg["sum_proj_costs_only"] / agg["iters"],
+            "mean_proj_dp_s":         agg["sum_proj_dp"] / agg["iters"],
+            "mean_proj_reproj_s":     agg["sum_proj_reproj"] / agg["iters"],
+            "mean_proj_total_s":      agg["sum_proj_total"] / agg["iters"],
+        }
+        row = {**meta, "iters": agg["iters"], **means, "success": int(bool(success_flag))}
+        fieldnames = list(row.keys())
+        write_header = not os.path.exists(path)
+        with open(path, "a", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            if write_header:
+                w.writeheader()
+            w.writerow(row)
+
 
     start_iter = time.perf_counter()
     for k in range(max_iters):
@@ -550,17 +607,17 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         step2_start = time.perf_counter()
         # Projektion pro Segment auf EIN Set (Kontrollpunkte)
         C_segments = [X[ctrl_per_seg*i : ctrl_per_seg*(i+1), :] for i in range(S)]  # each (ctrl_per_seg,3)
-        start_proj = time.perf_counter()
-        Z_traj, _ , _ = project_segments_with_coverage(C_segments, A_list, b_list, tol=1e-9, max_as_iters=8, warm_active_seq=True)
+        Z_traj, _ , _ , proj_timings = project_segments_with_coverage(C_segments, A_list, b_list, tol=1e-9, max_as_iters=8, warm_active_seq=True)
         z_traj = Z_traj
-        end_proj = time.perf_counter()
         # Trajektorie zum Anschauen sampeln (3D)
         
         step2_end = time.perf_counter()
         step3_start = time.perf_counter()
         # Residuen (3D)
-        r_inf, s_inf = admm_residuals_cp_3d(Acx, Acy, Acz, xi_x, xi_y, xi_z,
-                                            z_traj, z_traj_prev, rho, bcx, bcy, bcz)
+        r_inf, s_inf, scale_pri, _ = admm_residuals_cp_3d_from_C(
+            Cx, Cy, Cz, z_traj, z_traj_prev, Acx, Acy, Acz, rho
+        )
+
 
         
         # Dual update (scaled)
@@ -577,16 +634,56 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
                 rho = rho_new
                 rho_cache = None
 
+        # Skala für duale Toleranz nach OSQP: ||A^T y||_inf mit y = rho * u
+        ATy_x = Acx.T @ (rho * u_traj[:, 0])
+        ATy_y = Acy.T @ (rho * u_traj[:, 1])
+        ATy_z = Acz.T @ (rho * u_traj[:, 2])
+        scale_dual = max(np.linalg.norm(ATy_x, np.inf),
+                        np.linalg.norm(ATy_y, np.inf),
+                        np.linalg.norm(ATy_z, np.inf))
+
+
         rho_list.append(rho)
         step3_end = time.perf_counter()
 
-        # KONVERGENZTEST
+        eps_pri  = eps_abs_pri  + eps_rel * scale_pri
+        eps_dual = eps_abs_dual + eps_rel * max(scale_dual, 1.0)    
+
+        # Zusätzliche Info, wie bisher:
         max_diff = float(np.max(np.abs(X - z_traj)))
-        # print(f"Projektion abgeschlossen in {end_proj - start_proj:.6f} Sekunden.")
-        print(f"Schritte: Step1 {step1_end - step1_start:.5f}s, Step2 {step2_end - step2_start:.5f}s, Step3 {step3_end - step3_start:.5f}s")
-        #print total iteration time
-        print(f"Iteration {k+1} in : {step3_end - step1_start:.5f}s abgeschlossen")
-        if max_diff < eps:
+        iter_total = step3_end - step1_start
+
+        row = {
+            "iter": k + 1,
+            "step1_primal_s": step1_end - step1_start,
+            "step2_projection_s": step2_end - step2_start,
+            "step3_dual_residual_s": step3_end - step3_start,
+            "iter_total_s": iter_total,
+            "proj_costs_only_s": proj_timings.get("proj_costs_only", float("nan")),
+            "proj_dp_s": proj_timings.get("proj_dp", float("nan")),
+            "proj_reproj_s": proj_timings.get("proj_reproj", float("nan")),
+            "proj_total_s": proj_timings.get("proj_total", float("nan")),
+            "rho": rho,
+            "r_inf": r_inf,
+            "s_inf": s_inf,
+            "eps_pri": eps_pri,
+            "eps_dual": eps_dual,
+            "max_abs_XminusZ": max_diff,
+        }
+        runtime_rows.append(row)
+
+        # --- update means aggregators ---
+        agg["sum_step1"] += row["step1_primal_s"]
+        agg["sum_step2"] += row["step2_projection_s"]
+        agg["sum_step3"] += row["step3_dual_residual_s"]
+        agg["sum_iter_total"] += row["iter_total_s"]
+        agg["sum_proj_costs_only"] += row["proj_costs_only_s"]
+        agg["sum_proj_dp"] += row["proj_dp_s"]
+        agg["sum_proj_reproj"] += row["proj_reproj_s"]
+        agg["sum_proj_total"] += row["proj_total_s"]
+        agg["iters"] += 1
+
+        if (r_inf <= eps_pri) and (s_inf <= eps_dual):
             print("Konvergenz erreicht.")
             end_iter = time.perf_counter()
             print(f"Fertig nach {k+1} Iterationen in {end_iter - start_iter:.5f} Sekunden.")
@@ -605,6 +702,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
             # Concatenate sampled points from all segments -> (N,3) in world coords
             final_pts = np.vstack(x_traj)  # each element in x_traj is (m_per_seg,3)
+            _write_summary_csv(runtime_summary_csv, agg, success_flag=True, meta=summary_meta)
         
 
             visualize_voxelgrid_with_path(
