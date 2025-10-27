@@ -13,7 +13,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     from scipy.sparse.linalg import splu
 
     from utils.bernstein import build_T_block
-    from optimization.projection_utils import project_segments_with_coverage
+    from optimization.projection_utils import project_segments_with_coverage, prepare_halfspaces
     
 
     import pydecomp as pdc
@@ -499,9 +499,13 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     X = np.column_stack([Cx0, Cy0, Cz0])
 
 
+
+    Ab = prepare_halfspaces(A_list, b_list)
+
+
     # Segmentweise Projektion der Kontrollpunkte in den "besten" Set
     C_segments = [X[ctrl_per_seg*i : ctrl_per_seg*(i+1), :] for i in range(S)]  # X is (6S, 3)
-    Z_traj, _, _ , proj_timings_init = project_segments_with_coverage(C_segments, A_list, b_list, tol=1e-9, max_as_iters=8, warm_active_seq=True)
+    Z_traj, _, _ , proj_timings_init = project_segments_with_coverage(C_segments, A_list, b_list, tol=1e-9, max_as_iters=8, warm_active_seq=True, Ab_prepared=Ab)
     z_traj = Z_traj
     u_traj = np.zeros_like(z_traj)
 
@@ -616,7 +620,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         step2_start = time.perf_counter()
         # Projektion pro Segment auf EIN Set (Kontrollpunkte)
         C_segments = [X[ctrl_per_seg*i : ctrl_per_seg*(i+1), :] for i in range(S)]  # each (ctrl_per_seg,3)
-        Z_traj, _ , _ , proj_timings = project_segments_with_coverage(C_segments, A_list, b_list, tol=1e-9, max_as_iters=8, warm_active_seq=True)
+        Z_traj, _ , _ , proj_timings = project_segments_with_coverage(C_segments, A_list, b_list, tol=1e-9, max_as_iters=8, warm_active_seq=True, Ab_prepared=Ab)
         z_traj = Z_traj
         # Trajektorie zum Anschauen sampeln (3D)
         

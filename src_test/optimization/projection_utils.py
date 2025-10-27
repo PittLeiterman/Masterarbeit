@@ -104,6 +104,54 @@ def _proj_point_qp3d(p, A, b, tol=1e-9, max_as_iters=8, warm_active=None):
     d2 = float(np.dot(x - p, x - p))
     return x, d2, tuple(I)
 
+@njit(cache=True, fastmath=True, parallel=True, nogil=True)
+def compute_costs_lower_bound(C_segments, A_list, b_list):
+    """
+    C_segments: (S,K,3) float64, contiguous
+    A_list: numba.typed.List of (m_j,3) float64, contiguous
+    b_list: numba.typed.List of (m_j,) float64, contiguous
+    Return: costs (S,R)
+    """
+    S = C_segments.shape[0]
+    K = C_segments.shape[1]
+    R = len(A_list)
+    costs = np.empty((S, R), dtype=np.float64)
+
+    for j in prange(R):  # parallel über Regionen
+        A = A_list[j]      # (m,3)
+        b = b_list[j]      # (m,)
+        m = A.shape[0]
+        if m == 0:
+            for i in range(S):
+                costs[i, j] = 0.0
+            continue
+
+        # Normen einmal pro Region
+        nrm = np.empty(m, dtype=np.float64)
+        for r in range(m):
+            a0 = A[r,0]; a1 = A[r,1]; a2 = A[r,2]
+            n = (a0*a0 + a1*a1 + a2*a2)**0.5
+            if n < 1e-18:
+                n = 1.0
+            nrm[r] = n
+
+        # Segmente & Punkte
+        for i in range(S):
+            acc = 0.0
+            for t in range(K):
+                p0 = C_segments[i,t,0]
+                p1 = C_segments[i,t,1]
+                p2 = C_segments[i,t,2]
+                mx = 0.0
+                for r in range(m):
+                    # reine Skalararithmetik
+                    v = (A[r,0]*p0 + A[r,1]*p1 + A[r,2]*p2 - b[r]) / nrm[r]
+                    if v > mx:
+                        mx = v
+                if mx > 0.0:
+                    acc += mx*mx
+            costs[i, j] = acc
+    return costs
 
 @njit(cache=True, fastmath=True, inline='always')
 def _chol3_solve_sym(G00,G01,G02,G11,G12,G22, r0,r1,r2):
@@ -182,7 +230,8 @@ def project_points_to_polyhedron_qp3d(P, A, b, tol=1e-9, max_as_iters=8, warm_ac
 # ------------------------------------------------------------
 def project_segments_with_coverage(C_segments, A_list, b_list, *,
                                    tol=1e-9, max_as_iters=8,
-                                   warm_active_seq=True, verbose_timing=False):
+                                   warm_active_seq=True, verbose_timing=False,
+                                   Ab_prepared=None):
     """
     C_segments: list of (ctrl_per_seg,3)
     A_list/b_list: pro Region
@@ -205,23 +254,21 @@ def project_segments_with_coverage(C_segments, A_list, b_list, *,
     ctrl_per_seg = C_segments[0].shape[0]
 
     # Clean A/b pro Region
-    Ab = []
-    for A, b in zip(A_list, b_list):
-        A = np.asarray(A, np.float64); b = np.asarray(b, np.float64).reshape(-1)
-        active = ~np.all(np.isclose(A, 0.0, atol=1e-12), axis=1)
-        A = A[active]; b = b[active]
-        if A.shape[0] > 0:
-            nrm = np.linalg.norm(A, axis=1)
-            nrm[nrm < 1e-18] = 1.0
-            A = A / nrm[:,None]
-            b = b / nrm
-        Ab.append((np.ascontiguousarray(A), np.ascontiguousarray(b)))
+    if Ab_prepared is not None:
+        Ab = Ab_prepared
+    else:
+        Ab = prepare_halfspaces(A_list, b_list)
 
     # ---- 1) Kosten berechnen (ohne Projektionen puffern)
     t0 = time.perf_counter()
-    costs = np.empty((S, R), dtype=np.float64)
-    for j, (A, b) in enumerate(Ab):
-        costs[:, j] = _costs_for_region_costonly(C_segments_arr, A, b, tol=tol, max_as_iters=max_as_iters)
+    from numba.typed import List
+    A_nb = List()
+    B_nb = List()
+    for A, b in Ab:                      # Ab ist bereits gereinigt: float64, b 1D, contiguous
+        A_nb.append(A)
+        B_nb.append(b)
+
+    costs = compute_costs_lower_bound(C_segments_arr, A_nb, B_nb)
     t1 = time.perf_counter()
 
     # ---- 2) DP (unverändert, aber ohne projs-Speicher)
@@ -330,14 +377,11 @@ def project_segments_with_coverage(C_segments, A_list, b_list, *,
     Z_traj = np.vstack(Z_blocks).reshape(S * ctrl_per_seg, 3)
     t3 = time.perf_counter()
 
-    if verbose_timing:
-        print(f"Costs-only pass: {t1 - t0:.6f}s | DP: {t_dp1 - t_dp0:.6f}s | Re-proj assigned: {t3 - t2:.6f}s | Total: {time.perf_counter() - start_total:.6f}s")
-
     timings = {
         "proj_costs_only": t1 - t0,
         "proj_dp": t_dp1 - t_dp0,
         "proj_reproj": t3 - t2,
-        "proj_total": time.perf_counter() - start_total,
+        "proj_total": t3 - start_total,
     }
     return Z_traj, assign, costs, timings
 
@@ -582,3 +626,28 @@ def project_points_to_polyhedron_qp3d_numba(P, A, b, tol=1e-9, max_as_iters=8, w
         if warm_active_seq:
             warm0, warm1, warm2 = I0, I1, I2
     return X, d2, active
+
+def prepare_halfspaces(A_list, b_list, *, unitize=True, eps=1e-12):
+    Ab = []
+    for A, b in zip(A_list, b_list):
+        A = np.asarray(A, dtype=np.float64)
+        b = np.asarray(b, dtype=np.float64).reshape(-1)
+
+        # schnelle Zeilen-Filter (statt np.isclose)
+        # drop rows, deren max(|A_ij|) <= eps
+        mask = (np.abs(A).max(axis=1) > eps)
+        if mask.any():
+            A = A[mask]
+            b = b[mask]
+        else:
+            A = A[:0]; b = b[:0]
+
+        if unitize and A.shape[0] > 0:
+            # Normen (schnell & in-place nutzbar)
+            n = np.sqrt((A*A).sum(axis=1))
+            n[n < 1e-18] = 1.0
+            A = A / n[:, None]
+            b = b / n
+
+        Ab.append((np.ascontiguousarray(A), np.ascontiguousarray(b)))
+    return Ab
