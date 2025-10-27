@@ -1,7 +1,7 @@
 def run_admm_trajectory_optimization(config, DEBUG=False):    
     from input.make3DObstacles import load_voxel_grid   # or: from voxel_grid import load_voxel_grid
     from pathfinder.AStar3D import astar_3d
-    from utils.path_manipulation import keep_turns_np, reduce_turns_by_los
+    from utils.path_manipulation import keep_turns_np, reduce_turns_by_los, sample_every_k
     import os
     import csv
 
@@ -310,6 +310,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     eps_abs_pri  = float(config.get("eps_abs_pri", 1e-4))
     eps_abs_dual = float(config.get("eps_abs_dual", 1e-4))
     eps_rel      = float(config.get("eps_rel",     1e-3))
+    corners = int(config["corners"])
 
     os.makedirs(os.path.dirname(runtime_summary_csv), exist_ok=True)
     runtime_rows = []
@@ -358,8 +359,11 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
     print(f"Pfad gefunden")
     # Pfad Vereinfachung
-    turns = np.asarray(keep_turns_np(path_idx))
-    turns_idx = reduce_turns_by_los(turns, grid3d, clearance=0)
+    if corners != 0:
+        turns_idx = sample_every_k(path_idx, corners)
+    else:
+        turns = np.asarray(keep_turns_np(path_idx))
+        turns_idx = reduce_turns_by_los(turns, grid3d, clearance=0)
 
     if DEBUG:
         visualize_voxelgrid_with_path(
@@ -401,8 +405,13 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     # --- call ---
     A_list, b_list = pdc.convex_decomposition_3D(obs_np, path_np, box_np)
 
-
     print("Konvexe Zerlegung abgeschlossen")
+
+    num_polytopes = int(min(len(A_list), len(b_list)))
+
+    summary_meta.update({
+        "num_polytopes": num_polytopes,
+    })
 
 
     # -------- (1) Knot positions: straight line from start -> goal --------

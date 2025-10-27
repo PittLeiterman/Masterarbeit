@@ -326,3 +326,20 @@ def reduce_turns_by_los(turns_idx: np.ndarray,
         i = last_good
 
     return np.asarray(kept, dtype=int)
+
+
+def sample_every_k(points, k):
+    """
+    Behält jeden k-ten Punkt aus 'points'.
+    Der erste und der letzte Punkt sind immer enthalten.
+    """
+    if not points:
+        return []
+    if k is None or k <= 1:
+        # k<=1 bedeutet: alles behalten (Start und Ziel sind ohnehin drin)
+        return points[:]
+
+    sampled = points[::k]          # nimmt 0, k, 2k, ...
+    if sampled[-1] != points[-1]:  # Ziel anhängen, falls nicht schon enthalten
+        sampled.append(points[-1])
+    return sampled
