@@ -67,7 +67,7 @@ def aggregate_by_polytopes(df: pd.DataFrame) -> pd.DataFrame:
 
 def main():
     # Ordner mit deinen Summary-CSV-Dateien
-    base_dir = "results/polygons/tunnel2"
+    base_dir = "results/polygons/tunnel4"
     out_dir = os.path.join(base_dir, "plots")
     os.makedirs(out_dir, exist_ok=True)
 
@@ -161,6 +161,31 @@ def main():
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         plt.savefig(os.path.join(out_dir, "iterations_vs_num_polytopes.png"), dpi=150)
+
+        # ---- NEW: Plot total solve time = iterations * mean iter time ----
+    if all(c in agg.columns for c in ["iters_mean", "mean_iter_total_s_mean"]):
+        x = agg["num_polytopes"].values
+        total_time = agg["iters_mean"].values * agg["mean_iter_total_s_mean"].values
+
+        # (optional) error bars via simple variance propagation (assume independence)
+        if all(c in agg.columns for c in ["iters_std", "mean_iter_total_s_std"]):
+            total_std = np.sqrt(
+                (agg["iters_std"].values * agg["mean_iter_total_s_mean"].values) ** 2 +
+                (agg["iters_mean"].values * agg["mean_iter_total_s_std"].values) ** 2
+            )
+            plt.figure()
+            plt.errorbar(x, total_time, yerr=total_std, fmt="-o", capsize=3, label="total time")
+        else:
+            plt.figure()
+            plt.plot(x, total_time, "-o", label="total time")
+
+        plt.xlabel("number of convex polytopes")
+        plt.ylabel("total time [s]")
+        plt.title("Total solve time vs. number of polytopes")
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, "total_time_vs_num_polytopes.png"), dpi=150)
+
 
     print(f"Saved plots to: {out_dir}")
 
