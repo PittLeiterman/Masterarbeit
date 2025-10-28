@@ -1,0 +1,2 @@
+shape,start,goal,num_segments_cfg,m_per_seg,rho_init,eps,max_iters,num_polytopes,ratio,curviness_ratio,iters,mean_step1_s,mean_step2_s,mean_step3_s,mean_iter_total_s,mean_proj_costs_only_s,mean_proj_dp_s,mean_proj_reproj_s,mean_proj_total_s,success
+hallway3,"(25, 25, 10)","(89, 58, 10)",30,30,1e-07,0.01,4000,82,1.1,1.1738656174781372,9,0.0008576158563502961,0.0018234905631591876,0.00011500454921689298,0.002796300855051312,0.0003826248769958814,0.0006250187935721544,0.0007108054123818874,0.001759689741043581,1

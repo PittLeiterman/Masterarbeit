@@ -47,7 +47,7 @@ def maybe_cols(df, cols):
     return [c for c in cols if c in df.columns]
 
 def main():
-    base_dir = "results/rho/tunnel3"
+    base_dir = "results/rho/tunnel5"
     out_dir = os.path.join(base_dir, "plots")
     os.makedirs(out_dir, exist_ok=True)
 
@@ -125,6 +125,21 @@ def main():
         plt.legend()
         plt.tight_layout()
         plt.savefig(os.path.join(out_dir, "per_step_share_vs_rho.png"), dpi=150)
+
+    # --- NEW: Plot smoothness metrics vs rho ---
+    smooth_cols = [c for c in ["curviness_ratio"] if c in df.columns]
+    if smooth_cols:
+        plt.figure()
+        for c in smooth_cols:
+            plt.plot(rhos, df[c].values, marker="o", label=c)
+        plt.xscale("log")
+        plt.xlabel(r"initial $\rho$")
+        plt.ylabel("smoothness metric")
+        plt.title("Trajectory smoothness vs. initial rho")
+        plt.legend()
+        plt.grid(True, which="both", alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, "smoothness_vs_rho.png"), dpi=150)
 
     # --- Optional: iterations to converge vs rho
     if "iters" in df:

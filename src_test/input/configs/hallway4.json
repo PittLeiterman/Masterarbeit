@@ -9,6 +9,12 @@
     "eps": 0.01,
     "v_start": [0.0, 0.0, 0.0],
     "v_end": [0.0, 0.0, 0.0],
-    "num_segments": 60,
-    "m_per_seg": 30
+    "num_segments": 30,
+    "segment_ratio": 1.1,
+    "m_per_seg": 30,
+    "runtime_summary_csv": "results/rho/hallway4/e8.csv",
+    "eps_abs_pri": 1e-4,
+    "eps_abs_dual": 1e-4,
+    "eps_rel": 1e-2,
+    "corners": 1
 }

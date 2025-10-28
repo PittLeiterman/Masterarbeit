@@ -750,6 +750,13 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
             # Concatenate sampled points from all segments -> (N,3) in world coords
             final_pts = np.vstack(x_traj)  # each element in x_traj is (m_per_seg,3)
+            # --- Evaluate smoothness ---
+            curviness = np.sum(np.linalg.norm(np.diff(final_pts, axis=0), axis=1)) / np.linalg.norm(final_pts[-1] - final_pts[0])
+
+            summary_meta.update({
+                "curviness_ratio": float(curviness),
+            })
+            
             _write_summary_csv(runtime_summary_csv, agg, success_flag=True, meta=summary_meta)
         
 
