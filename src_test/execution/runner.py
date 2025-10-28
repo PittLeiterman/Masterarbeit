@@ -305,6 +305,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     v_start = tuple(config["v_start"])
     v_end = tuple(config["v_end"])
     num_segments = config.get("num_segments")
+    segment_ratio = config.get("segment_ratio")
     m_per_seg = int(config.get("m_per_seg", 10))
     runtime_summary_csv = config.get("runtime_summary_csv", "results/runtime_summary.csv")
     eps_abs_pri  = float(config.get("eps_abs_pri", 1e-4))
@@ -409,14 +410,15 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
 
     num_polytopes = int(min(len(A_list), len(b_list)))
 
+    # -------- (1) Knot positions: straight line from start -> goal --------
+    S = max(num_segments, int(num_polytopes * segment_ratio))
+    init_path = straight_line_path_3d(start_idx, goal_idx, S + 1, center_offsets=True) + origin  # (S+1, 3)
+
+
     summary_meta.update({
         "num_polytopes": num_polytopes,
+        "ratio": segment_ratio,
     })
-
-
-    # -------- (1) Knot positions: straight line from start -> goal --------
-    S = int(num_segments)
-    init_path = straight_line_path_3d(start_idx, goal_idx, S + 1, center_offsets=True) + origin  # (S+1, 3)
 
     # Split per-axis if you still need individual arrays downstream
     p_all_x = init_path[:, 0]
