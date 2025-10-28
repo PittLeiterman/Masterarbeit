@@ -67,7 +67,7 @@ def aggregate_by_polytopes(df: pd.DataFrame) -> pd.DataFrame:
 
 def main():
     # Ordner mit deinen Summary-CSV-Dateien
-    base_dir = "results/polygons/tunnel4"
+    base_dir = "results/polygons/hallway1"
     out_dir = os.path.join(base_dir, "plots")
     os.makedirs(out_dir, exist_ok=True)
 

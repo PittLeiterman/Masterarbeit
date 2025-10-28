@@ -619,7 +619,9 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         step1_end = time.perf_counter()
         step2_start = time.perf_counter()
         # Projektion pro Segment auf EIN Set (Kontrollpunkte)
-        C_segments = [X[ctrl_per_seg*i : ctrl_per_seg*(i+1), :] for i in range(S)]  # each (ctrl_per_seg,3)
+        X_plus_u = X + u_traj
+
+        C_segments = [X_plus_u[ctrl_per_seg*i : ctrl_per_seg*(i+1), :] for i in range(S)]  # each (ctrl_per_seg,3)
         Z_traj, _ , _ , proj_timings = project_segments_with_coverage(C_segments, A_list, b_list, tol=1e-9, max_as_iters=8, warm_active_seq=True, Ab_prepared=Ab)
         z_traj = Z_traj
         # Trajektorie zum Anschauen sampeln (3D)
@@ -695,6 +697,37 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         agg["sum_proj_reproj"] += row["proj_reproj_s"]
         agg["sum_proj_total"] += row["proj_total_s"]
         agg["iters"] += 1
+
+        if DEBUG:
+            x_traj = []
+            for i in range(S):
+                dt = segment_times[i+1] - segment_times[i]
+                t_vals = np.linspace(0, dt, m_per_seg)
+                ax_i = coeffs_x[i].value
+                ay_i = coeffs_y[i].value
+                az_i = coeffs_z[i].value
+                xs = [evaluate_polynomial(ax_i, t) for t in t_vals]
+                ys = [evaluate_polynomial(ay_i, t) for t in t_vals]
+                zs = [evaluate_polynomial(az_i, t) for t in t_vals]
+                x_traj.append(np.column_stack((xs, ys, zs))) 
+
+            visualize_voxelgrid_with_path(
+                    vg,
+                    path_xyz=np.vstack(x_traj),          # <-- plot the continuous final path
+                    tube_radius=0.25,
+                    grid_opacity=0.25,
+                    grid_color="blue",
+                    turns_idx=None,
+                    mark_start_end=True,
+                    mark_turns=False,
+                    # overlays
+                    A_list=A_list,
+                    b_list=b_list,
+                    show_decomposition=True,
+                    decomp_color="yellow",
+                    decomp_opacity=0.18,
+                    smooth_shading=True,
+                )
 
         if (r_inf <= eps_pri) and (s_inf <= eps_dual):
             print("Konvergenz erreicht.")
