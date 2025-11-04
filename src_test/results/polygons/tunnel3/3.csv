@@ -1,2 +1,2 @@
-shape,start,goal,num_segments_cfg,m_per_seg,rho_init,eps,max_iters,num_polytopes,iters,mean_step1_s,mean_step2_s,mean_step3_s,mean_iter_total_s,mean_proj_costs_only_s,mean_proj_dp_s,mean_proj_reproj_s,mean_proj_total_s,success
-tunnel3,"(0, 0, 0)","(0, 60, 0)",120,30,1e-08,0.01,4000,31,21,0.0009985080022098763,0.0017297082813456655,0.0001446863337020789,0.002873089147864708,0.00023371227351682528,0.0009333948227798654,0.00045882933773100376,0.001672033719452364,1
+shape,start,goal,num_segments_cfg,m_per_seg,rho_init,eps,max_iters,num_polytopes,ratio,curviness_ratio,iters,mean_step1_s,mean_step2_s,mean_step3_s,mean_iter_total_s,mean_proj_costs_only_s,mean_proj_dp_s,mean_proj_reproj_s,mean_proj_total_s,success
+tunnel3,"(0, 0, 0)","(0, 60, 0)",30,30,1e-06,0.01,4000,31,1.1,1.5807502117284462,18,0.000257812505070534,0.0008206897247065273,6.824084428242511e-05,0.0011469352757558227,0.00023007170400685735,0.00022569666099217202,0.00031268738934563263,0.0007886459093747868,1

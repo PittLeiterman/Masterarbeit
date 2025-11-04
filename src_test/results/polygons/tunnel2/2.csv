@@ -1,0 +1,2 @@
+shape,start,goal,num_segments_cfg,m_per_seg,rho_init,eps,max_iters,num_polytopes,ratio,curviness_ratio,iters,mean_step1_s,mean_step2_s,mean_step3_s,mean_iter_total_s,mean_proj_costs_only_s,mean_proj_dp_s,mean_proj_reproj_s,mean_proj_total_s,success
+tunnel2,"(0, 0, 0)","(20, 20, 20)",30,30,1e-06,0.01,4000,22,1.1,1.3470562315922237,30,0.00018486659197757642,0.0005849319704187413,5.627907036493222e-05,0.0008262152744767567,0.00015492652698109548,0.00017893892557670674,0.00021345284379397828,0.0005624710155340533,1
