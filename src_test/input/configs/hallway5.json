@@ -12,9 +12,9 @@
     "num_segments": 30,
     "segment_ratio": 1.7,
     "m_per_seg": 30,
-    "runtime_summary_csv": "results/ratio/hallway5/17.csv",
+    "runtime_summary_csv": "results/testruns/hallway5.csv",
     "eps_abs_pri": 1e-4,
     "eps_abs_dual": 1e-4,
     "eps_rel": 1e-2,
-    "corners": 1
+    "corners": 0
 }

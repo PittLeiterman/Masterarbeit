@@ -2,69 +2,45 @@ import numpy as np
 import time
 from numba import njit, prange
 
-# ------------------------------------------------------------
-# 3D Active-Set-Projektion: exakte Projektion auf Ax <= b
-# Löst min_x 1/2||x-p||^2 s.t. A x <= b
-# In 3D ist die aktive Menge höchstens Größe 3.
-# ------------------------------------------------------------
 def _proj_point_qp3d(p, A, b, tol=1e-9, max_as_iters=8, warm_active=None):
-    """
-    Single-point projection (3D) onto polyhedron {x | A x <= b} using a tiny Active-Set QP.
-    Returns:
-        x  : (3,) projected point
-        d2 : squared distance ||x - p||^2
-        I  : tuple of active indices
-    """
     p = np.asarray(p, float).reshape(3)
     A = np.asarray(A, float)
     b = np.asarray(b, float).reshape(-1)
     m = A.shape[0]
 
-    # Triviale Fälle
     if m == 0:
         return p.copy(), 0.0, ()
 
-    # Start: prüfe, ob p schon zulässig ist
     v = A @ p - b
     i_max = int(np.argmax(v)) if m else 0
     if m == 0 or v[i_max] <= tol:
         return p.copy(), 0.0, ()
 
-    # Aktive Menge I initialisieren (Warm-start erlaubt)
     if warm_active is not None and len(warm_active) > 0:
-        I = list(warm_active[:3])  # maximal 3
+        I = list(warm_active[:3])
     else:
         I = [i_max]
 
-    # Active-Set Iterationen (sehr klein in der Praxis)
     for _ in range(max_as_iters):
         k = len(I)
-        # G = A_I A_I^T (k×k), rhs = A_I p - b_I
-        A_I = A[I, :]        # (k,3)
-        rhs = A_I @ p - b[I] # (k,)
+        A_I = A[I, :]
+        rhs = A_I @ p - b[I]
 
-        # Löse G λ = rhs; G ist klein (1..3)
         G = A_I @ A_I.T
-        # numerische Stabilität: winzige Diagonalerhebung
         G.flat[::k+1] += 1e-15
 
         try:
-            # Für k<=3 ist Solve billig; Cholesky falls SPD, sonst Fallback
             if k == 1:
                 lam = rhs / G[0, 0]
             else:
                 lam = np.linalg.solve(G, rhs)
         except np.linalg.LinAlgError:
-            # Robustheits-Fallback
             lam = np.linalg.lstsq(G, rhs, rcond=None)[0]
 
-        # KKT-Zeichenbedingung: λ >= 0
         if np.any(lam < -1e-12):
-            # Entferne den am meisten negativen Multiplikator (klassisches AS-QP)
             drop = int(np.argmin(lam))
             del I[drop]
             if len(I) == 0:
-                # leer -> wähle stärkste Verletzung neu
                 i_max = int(np.argmax(A @ p - b))
                 if (A @ p - b)[i_max] > tol:
                     I = [i_max]
@@ -72,61 +48,45 @@ def _proj_point_qp3d(p, A, b, tol=1e-9, max_as_iters=8, warm_active=None):
                     return p.copy(), 0.0, ()
             continue
 
-        # Kandidatenpunkt
-        x = p - A_I.T @ lam  # x = p - A_I^T λ
-
-        # Globale Zulässigkeit prüfen
+        x = p - A_I.T @ lam
         v = A @ x - b
         i_max = int(np.argmax(v))
         if v[i_max] <= tol:
             d2 = float(np.dot(x - p, x - p))
             return x, d2, tuple(I)
 
-        # Sonst: neue verletzte Nebenbedingung aufnehmen
         if i_max not in I:
             if len(I) < 3:
                 I = I + [i_max]
             else:
-                # Wenn bereits 3 aktiv sind: ersetze die schwächste aktive
-                # Heuristik: ersetze die mit kleinster λ (am "unwichtigsten")
                 if len(lam) > 0:
                     j_rep = int(np.argmin(lam))
                     I[j_rep] = i_max
                 else:
-                    # degenerater Fall
                     I[-1] = i_max
         else:
-            # Sollte selten passieren; breche ab, um Endlosschleifen zu vermeiden
             break
 
-    # Fallback: gib letzten x zurück (approx)
     x = p if 'x' not in locals() else x
     d2 = float(np.dot(x - p, x - p))
     return x, d2, tuple(I)
 
 @njit(cache=True, fastmath=True, parallel=True, nogil=True)
 def compute_costs_lower_bound(C_segments, A_list, b_list):
-    """
-    C_segments: (S,K,3) float64, contiguous
-    A_list: numba.typed.List of (m_j,3) float64, contiguous
-    b_list: numba.typed.List of (m_j,) float64, contiguous
-    Return: costs (S,R)
-    """
     S = C_segments.shape[0]
     K = C_segments.shape[1]
     R = len(A_list)
     costs = np.empty((S, R), dtype=np.float64)
 
-    for j in prange(R):  # parallel über Regionen
-        A = A_list[j]      # (m,3)
-        b = b_list[j]      # (m,)
+    for j in prange(R):
+        A = A_list[j]
+        b = b_list[j]
         m = A.shape[0]
         if m == 0:
             for i in range(S):
                 costs[i, j] = 0.0
             continue
 
-        # Normen einmal pro Region
         nrm = np.empty(m, dtype=np.float64)
         for r in range(m):
             a0 = A[r,0]; a1 = A[r,1]; a2 = A[r,2]
@@ -135,7 +95,6 @@ def compute_costs_lower_bound(C_segments, A_list, b_list):
                 n = 1.0
             nrm[r] = n
 
-        # Segmente & Punkte
         for i in range(S):
             acc = 0.0
             for t in range(K):
@@ -144,7 +103,6 @@ def compute_costs_lower_bound(C_segments, A_list, b_list):
                 p2 = C_segments[i,t,2]
                 mx = 0.0
                 for r in range(m):
-                    # reine Skalararithmetik
                     v = (A[r,0]*p0 + A[r,1]*p1 + A[r,2]*p2 - b[r]) / nrm[r]
                     if v > mx:
                         mx = v
@@ -155,7 +113,6 @@ def compute_costs_lower_bound(C_segments, A_list, b_list):
 
 @njit(cache=True, fastmath=True, inline='always')
 def _chol3_solve_sym(G00,G01,G02,G11,G12,G22, r0,r1,r2):
-    # Cholesky for symmetric positive (semi)definite 3x3.
     eps = 1e-15
     L00 = (G00 + eps)**0.5
     L10 = G01 / L00
@@ -163,44 +120,20 @@ def _chol3_solve_sym(G00,G01,G02,G11,G12,G22, r0,r1,r2):
     L11 = (G11 - L10*L10 + eps)**0.5
     L21 = (G12 - L20*L10) / L11
     L22 = (G22 - L20*L20 - L21*L21 + eps)**0.5
-    # forward
     y0 = r0 / L00
     y1 = (r1 - L10*y0) / L11
     y2 = (r2 - L20*y0 - L21*y1) / L22
-    # backward
     x2 = y2 / L22
     x1 = (y1 - L21*x2) / L11
     x0 = (y0 - L10*x1 - L20*x2) / L00
     return x0, x1, x2
 
-@njit(cache=True, fastmath=True, parallel=True, nogil=True)
-def _costs_for_region_costonly(C_stack, A, b, tol=1e-9, max_as_iters=8):
-    S = C_stack.shape[0]
-    costs = np.empty(S, dtype=np.float64)
-    for i in prange(S):
-        P = C_stack[i]
-        s = 0.0
-        for t in range(P.shape[0]):
-            x0,x1,x2,di2,_,_,_ = qp3d_point_njit(P[t], A, b, tol, max_as_iters, -1, -1, -1)
-            s += di2
-        costs[i] = s
-    return costs
-
 
 def project_points_to_polyhedron_qp3d(P, A, b, tol=1e-9, max_as_iters=8, warm_active_seq=False):
-    """
-    Vectorized wrapper über Punkte (N,3).
-    warm_active_seq=True: aktives Set entlang der Punktfolge propagieren (gut bei Trajektorien).
-    Returns:
-        P_proj: (N,3)
-        d2    : (N,)
-        active_sets: list of tuples (für Debug/Warm-start Downstream)
-    """
     P = np.asarray(P, float).reshape(-1, 3)
     A = np.asarray(A, float)
     b = np.asarray(b, float).reshape(-1)
 
-    # Zero-rows entfernen (wie bei dir)
     active = ~np.all(np.isclose(A, 0.0, atol=1e-12), axis=1)
     A = A[active]; b = b[active]
     if A.shape[0] == 0:
@@ -222,27 +155,12 @@ def project_points_to_polyhedron_qp3d(P, A, b, tol=1e-9, max_as_iters=8, warm_ac
     return X, d2, active_sets
 
 
-# ------------------------------------------------------------
-# 3D: project segments with coverage (DP) – Speicher/Speed-optimiert
-# 1) Nur Kosten berechnen (streaming, ohne Proj-Puffer).
-# 2) DP lösen.
-# 3) Nur zugewiesene Projektionen neu berechnen und stapeln.
-# ------------------------------------------------------------
 def project_segments_with_coverage(C_segments, A_list, b_list, *,
                                    tol=1e-9, max_as_iters=8,
                                    warm_active_seq=True, verbose_timing=False,
                                    Ab_prepared=None):
-    """
-    C_segments: list of (ctrl_per_seg,3)
-    A_list/b_list: pro Region
-    Returns:
-        Z_traj: (S*ctrl_per_seg, 3)
-        assign: (S,)
-        costs:  (S, R)  (nur Summen der d²)
-    """
     start_total = time.perf_counter()
 
-    # Normalize
     C_segments_arr = np.ascontiguousarray(np.stack(C_segments, axis=0))
     S = len(C_segments)
     R = len(A_list)
@@ -253,25 +171,21 @@ def project_segments_with_coverage(C_segments, A_list, b_list, *,
         raise ValueError("A_list/b_list leer.")
     ctrl_per_seg = C_segments[0].shape[0]
 
-    # Clean A/b pro Region
     if Ab_prepared is not None:
         Ab = Ab_prepared
     else:
         Ab = prepare_halfspaces(A_list, b_list)
 
-    # ---- 1) Kosten berechnen (ohne Projektionen puffern)
     t0 = time.perf_counter()
     from numba.typed import List
     A_nb = List()
     B_nb = List()
-    for A, b in Ab:                      # Ab ist bereits gereinigt: float64, b 1D, contiguous
+    for A, b in Ab:
         A_nb.append(A)
         B_nb.append(b)
 
     costs = compute_costs_lower_bound(C_segments_arr, A_nb, B_nb)
     t1 = time.perf_counter()
-
-    # ---- 2) DP (unverändert, aber ohne projs-Speicher)
     t_dp0 = time.perf_counter()
     pref_cols = [np.concatenate(([0.0], np.cumsum(costs[:, j], axis=0))) for j in range(R)]
     INF = 1e18
@@ -332,36 +246,27 @@ def project_segments_with_coverage(C_segments, A_list, b_list, *,
                            f"Boundaries: {boundaries}, S={S}, R={R}")
     t_dp1 = time.perf_counter()
 
-    # ---- 3) Nur die tatsächlich zugewiesenen Projektionen neu berechnen
     t2 = time.perf_counter()
     Z_blocks = []
-    # Warm-starts pro Region entlang zusammenhängender Blöcke
     for j in range(R):
         idxs = np.where(assign == j)[0]
         if idxs.size == 0:
             continue
         A, b = Ab[j]
-        warm_active = None
-        # zusammenhängende Teilstücke pro Region finden
         runs = np.split(idxs, np.where(np.diff(idxs) != 1)[0] + 1)
         for run in runs:
-            warm_active = None
             for i in run:
                 C = C_segments[i]
                 if A.shape[0] == 0:
                     X = C.copy()
                 else:
-                    X, d2, _ = project_points_to_polyhedron_qp3d_numba(
+                    X, _ , _ = project_points_to_polyhedron_qp3d_numba(
                         C, A, b, tol=tol, max_as_iters=max_as_iters, warm_active_seq=warm_active_seq
                     )
                 Z_blocks.append(X)
 
     if len(Z_blocks) != S:
-        # Falls Reihenfolge durch Blöcke nicht natürlich: sortieren
-        # (Normalerweise kommt genau S Stücke in Segment-Reihenfolge.)
-        # Backup: in Segmentreihenfolge zusammenbauen
         Z_blocks = []
-        warm_region_active = [None]*R
         for i in range(S):
             j = int(assign[i])
             A, b = Ab[j]
@@ -369,7 +274,7 @@ def project_segments_with_coverage(C_segments, A_list, b_list, *,
             if A.shape[0] == 0:
                 X = C.copy()
             else:
-                X, d2, _ = project_points_to_polyhedron_qp3d_numba(
+                X, _ , _ = project_points_to_polyhedron_qp3d_numba(
                     C, A, b, tol=tol, max_as_iters=max_as_iters, warm_active_seq=warm_active_seq
                 )
             Z_blocks.append(X)
@@ -399,10 +304,8 @@ def _solve1(G00, r0):
 
 @njit(cache=True, fastmath=True)
 def _solve2(G00,G01,G11, r0,r1):
-    # [[G00, G01],[G01, G11]] [l0,l1]=[r0,r1]
     det = G00*G11 - G01*G01
     if abs(det) < 1e-18:
-        # least-squares fallback
         det = 1e-18
     inv00 =  G11/det
     inv01 = -G01/det
@@ -412,59 +315,13 @@ def _solve2(G00,G01,G11, r0,r1):
     return l0, l1
 
 @njit(cache=True, fastmath=True)
-def _solve3(G, r):
-    # 3x3 solve via Gaussian elimination (tiny, stable enough here)
-    A = np.empty((3,4))
-    A[0,0]=G[0,0]; A[0,1]=G[0,1]; A[0,2]=G[0,2]; A[0,3]=r[0]
-    A[1,0]=G[1,0]; A[1,1]=G[1,1]; A[1,2]=G[1,2]; A[1,3]=r[1]
-    A[2,0]=G[2,0]; A[2,1]=G[2,1]; A[2,2]=G[2,2]; A[2,3]=r[2]
-    # Pivot 0
-    if abs(A[0,0]) < 1e-18: A[0,0] = 1e-18
-    f = 1.0/A[0,0]
-    for j in range(1,4): A[0,j] *= f
-    A[0,0] = 1.0
-    # Eliminate col 0
-    for i in range(1,3):
-        m = A[i,0]
-        for j in range(1,4):
-            A[i,j] -= m*A[0,j]
-        A[i,0]=0.0
-    # Pivot 1
-    if abs(A[1,1]) < 1e-18: A[1,1] = 1e-18
-    f = 1.0/A[1,1]
-    for j in range(2,4): A[1,j] *= f
-    A[1,1] = 1.0
-    # Eliminate col 1
-    m = A[0,1]
-    for j in range(2,4): A[0,j] -= m*A[1,j]
-    A[0,1]=0.0
-    m = A[2,1]
-    for j in range(2,4): A[2,j] -= m*A[1,j]
-    A[2,1]=0.0
-    # Pivot 2
-    if abs(A[2,2]) < 1e-18: A[2,2] = 1e-18
-    f = 1.0/A[2,2]
-    A[2,3] *= f
-    A[2,2] = 1.0
-    # Back-substitute
-    A[1,3] -= A[1,2]*A[2,3]; A[1,2]=0.0
-    A[0,3] -= A[0,2]*A[2,3]; A[0,2]=0.0
-    return A[0,3], A[1,3], A[2,3]
-
-@njit(cache=True, fastmath=True)
 def qp3d_point_njit(p, A, b, tol=1e-9, max_as_iters=8, warm0=-1, warm1=-1, warm2=-1):
-    """
-    Active-Set QP für einen Punkt.
-    warm0..2: initiale aktive Indizes (oder -1).
-    Rückgabe: x(3,), d2, I0,I1,I2 (=-1 wenn inaktiv)
-    """
     m = A.shape[0]
     x0, x1, x2 = p[0], p[1], p[2]
 
     if m == 0:
         return x0, x1, x2, 0.0, -1, -1, -1
 
-    # Prüfe Feasibility von p
     vmax = -1e30; imax = -1
     for i in range(m):
         v = _dot3(A[i,0],A[i,1],A[i,2], x0,x1,x2) - b[i]
@@ -473,7 +330,6 @@ def qp3d_point_njit(p, A, b, tol=1e-9, max_as_iters=8, warm0=-1, warm1=-1, warm2
     if vmax <= tol:
         return x0, x1, x2, 0.0, -1, -1, -1
 
-    # Aktives Set (max 3)
     I0, I1, I2 = -1, -1, -1
     if warm0 >= 0: I0 = warm0
     if warm1 >= 0:
@@ -487,14 +343,12 @@ def qp3d_point_njit(p, A, b, tol=1e-9, max_as_iters=8, warm0=-1, warm1=-1, warm2
         I0 = imax
 
     for _ in range(max_as_iters):
-        # baue A_I und rhs
         k = 0
         idx = np.empty(3, dtype=np.int64)
         if I0 >= 0: idx[k]=I0; k+=1
         if I1 >= 0: idx[k]=I1; k+=1
         if I2 >= 0: idx[k]=I2; k+=1
 
-        # rhs = A_I p - b_I ; G = A_I A_I^T
         if k == 1:
             i0 = idx[0]
             a00,a01,a02 = A[i0,0],A[i0,1],A[i0,2]
@@ -502,7 +356,6 @@ def qp3d_point_njit(p, A, b, tol=1e-9, max_as_iters=8, warm0=-1, warm1=-1, warm2
             G00 = a00*a00 + a01*a01 + a02*a02 + 1e-15
             lam0 = _solve1(G00, r0)
             if lam0 < -1e-12:
-                # Drop negatives
                 I0, I1, I2 = -1, I1, I2
                 continue
             x0 = p[0] - (a00*lam0)
@@ -521,7 +374,6 @@ def qp3d_point_njit(p, A, b, tol=1e-9, max_as_iters=8, warm0=-1, warm1=-1, warm2
             G11 = a10*a10 + a11*a11 + a12*a12 + 1e-15
             l0,l1 = _solve2(G00,G01,G11, r0,r1)
             if l0 < -1e-12 or l1 < -1e-12:
-                # Drop most negative
                 if l0 <= l1:
                     I0 = I1; I1 = I2; I2 = -1
                 else:
@@ -531,7 +383,6 @@ def qp3d_point_njit(p, A, b, tol=1e-9, max_as_iters=8, warm0=-1, warm1=-1, warm2
             x1 = p[1] - (a01*l0 + a11*l1)
             x2 = p[2] - (a02*l0 + a12*l1)
         else:
-            # k == 3
             i0,i1,i2 = idx[0], idx[1], idx[2]
             a00,a01,a02 = A[i0,0],A[i0,1],A[i0,2]
             a10,a11,a12 = A[i1,0],A[i1,1],A[i1,2]
@@ -564,7 +415,6 @@ def qp3d_point_njit(p, A, b, tol=1e-9, max_as_iters=8, warm0=-1, warm1=-1, warm2
             x1 = p[1] - (a01*l0 + a11*l1 + a21*l2)
             x2 = p[2] - (a02*l0 + a12*l1 + a22*l2)
 
-        # Check globale Feasibility
         vmax = -1e30; imax = -1
         for i in range(m):
             v = _dot3(A[i,0],A[i,1],A[i,2], x0,x1,x2) - b[i]
@@ -573,8 +423,6 @@ def qp3d_point_njit(p, A, b, tol=1e-9, max_as_iters=8, warm0=-1, warm1=-1, warm2
         if vmax <= tol:
             dx0 = x0 - p[0]; dx1 = x1 - p[1]; dx2 = x2 - p[2]
             d2 = dx0*dx0 + dx1*dx1 + dx2*dx2
-            # Rückgabe inkl. aktives Set
-            # Re-konstruiere I0,I1,I2 aus der lokalen Reihenfolge:
             k = 0
             i0=-1; i1=-1; i2=-1
             if I0 >= 0: 
@@ -589,16 +437,13 @@ def qp3d_point_njit(p, A, b, tol=1e-9, max_as_iters=8, warm0=-1, warm1=-1, warm2
                 else: i2=I2
             return x0, x1, x2, d2, i0,i1,i2
 
-        # Neue verletzte Bedingung aufnehmen/ersetzen
         if I0 != imax and I1 != imax and I2 != imax:
             if I0 == -1: I0 = imax
             elif I1 == -1: I1 = imax
             elif I2 == -1: I2 = imax
             else:
-                # Heuristik: ersetze I2
                 I2 = imax
         else:
-            # Sicherheitsabbruch
             break
 
     dx0 = x0 - p[0]; dx1 = x1 - p[1]; dx2 = x2 - p[2]
@@ -607,10 +452,6 @@ def qp3d_point_njit(p, A, b, tol=1e-9, max_as_iters=8, warm0=-1, warm1=-1, warm2
 
 @njit(cache=True, fastmath=True)
 def project_points_to_polyhedron_qp3d_numba(P, A, b, tol=1e-9, max_as_iters=8, warm_active_seq=True):
-    """
-    Numba-batch Wrapper. Gibt (X, d2, active_sets) zurück.
-    active_sets: (N,3) mit -1 für inaktive Plätze.
-    """
     N = P.shape[0]
     X = np.empty_like(P)
     d2 = np.empty(N)
@@ -633,8 +474,6 @@ def prepare_halfspaces(A_list, b_list, *, unitize=True, eps=1e-12):
         A = np.asarray(A, dtype=np.float64)
         b = np.asarray(b, dtype=np.float64).reshape(-1)
 
-        # schnelle Zeilen-Filter (statt np.isclose)
-        # drop rows, deren max(|A_ij|) <= eps
         mask = (np.abs(A).max(axis=1) > eps)
         if mask.any():
             A = A[mask]
@@ -643,7 +482,6 @@ def prepare_halfspaces(A_list, b_list, *, unitize=True, eps=1e-12):
             A = A[:0]; b = b[:0]
 
         if unitize and A.shape[0] > 0:
-            # Normen (schnell & in-place nutzbar)
             n = np.sqrt((A*A).sum(axis=1))
             n[n < 1e-18] = 1.0
             A = A / n[:, None]
