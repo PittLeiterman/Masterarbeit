@@ -177,53 +177,6 @@ def run_admm_trajectory_optimization(config, DEBUG=False, PROJECTIONS=False):
                     else:
                         pass
 
-        if proj_segments:
-            r = proj_tube_radius if proj_tube_radius is not None else (tube_radius * 0.75)
-            n = len(proj_segments)
-
-            def _sample_bezier_from_controls(C_seg: np.ndarray, M: int = 50) -> np.ndarray:
-                from math import comb
-                C_seg = np.asarray(C_seg, float)
-                K = C_seg.shape[0]
-                d = K - 1
-                t = np.linspace(0.0, 1.0, M)
-                # Bernstein basis (vectorized)
-                B = np.stack([ [comb(d, r) * (ti**r) * ((1.0 - ti)**(d - r)) for r in range(K)] for ti in t ], axis=0)
-                return B @ C_seg
-
-            def _idx_color(i, n):
-                import colorsys
-                # evenly spaced hues, decent contrast
-                h = (i * 1.3/ max(1, n)) % 1.0
-                s = 0.65
-                v = 0.95
-                r_, g_, b_ = colorsys.hsv_to_rgb(h, s, v)
-                return (int(r_*255), int(g_*255), int(b_*255))  # pyvista accepts 0–255 RGB
-
-            for i, seg in enumerate(proj_segments):
-                seg = np.asarray(seg, float)
-                if seg.ndim == 2 and seg.shape[0] >= 2 and seg.shape[1] == 3:
-                    color_i = _idx_color(i, n)
-
-                    # --- evaluate the Bézier curve defined by these projected controls ---
-                    # Sample count scales with degree for smoothness
-                    M = max(40, 8 * (seg.shape[0] - 1))
-                    curve_pts = _sample_bezier_from_controls(seg, M)
-
-                    # Draw the curved segment
-                    spline = pv.Spline(curve_pts, n_points=len(curve_pts))
-                    p.add_mesh(spline.tube(radius=r, n_sides=16), color=color_i)
-
-                    # (optional) also show the projected control points as small spheres
-                    try:
-                        pts = pv.PolyData(seg)
-                        glyph_geom = pv.Sphere(radius=r*0.9)
-                        glyphs = pts.glyph(scale=False, geom=glyph_geom)
-                        p.add_mesh(glyphs, color=color_i)
-                    except Exception:
-                        pass
-
-
         p.show_axes()
         p.show()
     
@@ -630,43 +583,6 @@ def run_admm_trajectory_optimization(config, DEBUG=False, PROJECTIONS=False):
         agg["sum_proj_reproj"] += row["proj_reproj_s"]
         agg["sum_proj_total"] += row["proj_total_s"]
         agg["iters"] += 1
-
-        if PROJECTIONS:
-            x_traj = []
-            proj_segments = [
-            z_traj[ctrl_per_seg*i : ctrl_per_seg*(i+1), :]   # (ctrl_per_seg, 3)
-            for i in range(S)
-]
-            for i in range(S):
-                dt = segment_times[i+1] - segment_times[i]
-                t_vals = np.linspace(0, dt, m_per_seg)
-                ax_i = coeffs_x[i].value
-                ay_i = coeffs_y[i].value
-                az_i = coeffs_z[i].value
-                xs = [evaluate_polynomial(ax_i, t) for t in t_vals]
-                ys = [evaluate_polynomial(ay_i, t) for t in t_vals]
-                zs = [evaluate_polynomial(az_i, t) for t in t_vals]
-                x_traj.append(np.column_stack((xs, ys, zs))) 
-
-            visualize_voxelgrid_with_path(
-                    vg,
-                    path_xyz=np.vstack(x_traj),
-                    tube_radius=0.25,
-                    grid_opacity=0.25,
-                    grid_color="blue",
-                    turns_idx=None,
-                    mark_start_end=True,
-                    mark_turns=False,
-                    A_list=A_list,
-                    b_list=b_list,
-                    show_decomposition=True,
-                    decomp_color="yellow",
-                    decomp_opacity=0.18,
-                    smooth_shading=True,
-                    proj_segments=proj_segments,
-                    proj_color="cyan",
-                    proj_tube_radius=0.18,
-                )
 
         if (r_inf <= eps_pri) and (s_inf <= eps_dual):
             print("Konvergenz erreicht.")
