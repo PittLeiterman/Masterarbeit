@@ -4,7 +4,6 @@ import numpy as np
 import heapq
 
 def heuristic(a, b):
-    # Euklidische Distanz
     return np.linalg.norm(np.array(a) - np.array(b))
 
 def get_neighbors(node, grid):
@@ -12,7 +11,6 @@ def get_neighbors(node, grid):
     r, c = node
     neighbors = []
     
-    # 8 Richtungen (inkl. Diagonalen)
     moves = [(-1, 0), (1, 0), (0, -1), (0, 1),
              (-1, -1), (-1, 1), (1, -1), (1, 1)]
     
@@ -20,7 +18,6 @@ def get_neighbors(node, grid):
         rr, cc = r + dr, c + dc
         if 0 <= rr < rows and 0 <= cc < cols:
             if abs(dr) + abs(dc) == 2:
-                # Diagonal: Prüfen ob angrenzende Kacheln frei sind (no corner cutting)
                 if grid[r, cc] == 1 or grid[rr, c] == 1:
                     continue
             neighbors.append((rr, cc))

@@ -4,7 +4,6 @@ from tkinter import ttk, messagebox, filedialog
 import random
 import math
 
-# 3D plotting (embedded in Tkinter)
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
@@ -53,10 +52,6 @@ def build_forest_voxels(trees, nx, ny, nz):
     return voxels
 
 def build_box_shell(nx, ny, nz, thickness=1):
-    """
-    Return a set of voxels forming the *shell* of the axis-aligned box [0..nx-1]×[0..ny-1]×[0..nz-1]
-    with the given thickness (in voxels).
-    """
     t = max(1, int(thickness))
     vox = set()
     # x-faces
@@ -269,7 +264,6 @@ class TreeSpawnerApp(tk.Tk):
             messagebox.showerror("Out of bounds", "Z0 must lie inside the map.")
             return
 
-        # ensure cylinder footprint stays inside XY bounds
         x_min, x_max = r, max(0, nx - 1 - r)
         y_min, y_max = r, max(0, ny - 1 - r)
         if x_min > x_max or y_min > y_max:
@@ -308,7 +302,6 @@ class TreeSpawnerApp(tk.Tk):
         self.update_plot()
 
     def on_apply_size(self):
-        # changing size invalidates caches
         self.voxels.clear()
         self.bounds_cache = set()
         self.status_var.set(f"Map size set to {self.nx_var.get()}×{self.ny_var.get()}×{self.nz_var.get()}.")
@@ -317,7 +310,6 @@ class TreeSpawnerApp(tk.Tk):
     def on_build(self):
         nx, ny, nz = self.nx_var.get(), self.ny_var.get(), self.nz_var.get()
         self.voxels = build_forest_voxels(self.trees, nx, ny, nz)
-        # update bounds cache (so preview/export use the latest thickness)
         self._rebuild_bounds()
         self.status_var.set(f"Built: {len(self.voxels)} tree voxels, {len(self.bounds_cache)} bound voxels (T={self.bound_thickness_var.get()}).")
         self.update_plot()
@@ -326,7 +318,6 @@ class TreeSpawnerApp(tk.Tk):
         if not self.voxels and not self.include_bounds_export_var.get():
             messagebox.showwarning("Nothing to export", "Build the map first, or enable bounds export.")
             return
-        # ensure bounds cache is current
         if not self.bounds_cache:
             self._rebuild_bounds()
 
@@ -386,7 +377,6 @@ class TreeSpawnerApp(tk.Tk):
         nx, ny, nz = self.nx_var.get(), self.ny_var.get(), self.nz_var.get()
         self._draw_map_box_wire(nx, ny, nz)
 
-        # Preview: union tree voxels + (optional) bounds voxels
         preview_set = set(self.voxels)
         if self.include_bounds_preview_var.get():
             if not self.bounds_cache:
@@ -404,7 +394,6 @@ class TreeSpawnerApp(tk.Tk):
             zs = [p[2] for p in pts]
             self.ax.scatter(xs, ys, zs, s=float(self.tree_point_size_var.get()), alpha=alpha)
 
-        # show individual tree centers as small markers at base
         for (x, y, z0, r, h) in self.trees:
             self.ax.scatter([x],[y],[z0], s=20)
 

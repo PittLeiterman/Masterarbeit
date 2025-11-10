@@ -11,14 +11,14 @@ def _power_to_bernstein_matrix(n: int) -> np.ndarray:
     return T
 
 def _monomial_to_bernstein_matrix(n: int, dt: float) -> np.ndarray:
-    T = _power_to_bernstein_matrix(n)        # (n+1) x (n+1)
-    D = np.diag([dt**m for m in range(n+1)]) # skaliert u=t/dt
-    return T @ D                              # (n+1) x (n+1)
+    T = _power_to_bernstein_matrix(n)
+    D = np.diag([dt**m for m in range(n+1)])
+    return T @ D
 
 def build_T_block(segment_times, degree: int = 5) -> np.ndarray:
     blocks = []
     for i in range(len(segment_times)-1):
         dt = float(segment_times[i+1] - segment_times[i])
-        Ti = _monomial_to_bernstein_matrix(degree, dt)  # (n+1)x(n+1) => 6x6
+        Ti = _monomial_to_bernstein_matrix(degree, dt)
         blocks.append(Ti)
-    return scipy.linalg.block_diag(*blocks)  # (6S x 6S)
+    return scipy.linalg.block_diag(*blocks)

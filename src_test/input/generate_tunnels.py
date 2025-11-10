@@ -45,10 +45,6 @@ def fill_sphere(center, radius, voxels):
                     voxels.add((x, y, z))
 
 def fill_cylinder_along_segment(a, b, radius, voxels):
-    """
-    Voxelize a solid generalized cylinder around segment AB by inclusion test:
-    Add every integer voxel whose center is within 'radius' of segment AB.
-    """
     if radius <= 0:
         return
     ax, ay, az = a
@@ -75,7 +71,6 @@ def fill_cylinder_along_segment(a, b, radius, voxels):
                     voxels.add((x, y, z))
 
 def build_tunnel(points, radius):
-    """Solid capsule tunnel (outer or inner)."""
     voxels = set()
     if not points or radius <= 0:
         return voxels
@@ -89,16 +84,11 @@ def build_tunnel(points, radius):
     return voxels
 
 def build_tunnel_shell(points, outer_radius, wall_thickness):
-    """
-    Hollow tunnel shell = outer (radius R) minus inner (radius R - t).
-    End caps remain closed (spherical shells).
-    """
     t = max(1, int(wall_thickness))
     R = int(outer_radius)
     r_inner = max(0, R - t)
     outer = build_tunnel(points, R)
     inner = build_tunnel(points, r_inner)
-    # shell is what's in outer but not in inner
     return outer.difference(inner)
 
 # --------- UI App ---------
@@ -108,8 +98,8 @@ class TunnelApp(tk.Tk):
         self.title("Tunnel Voxelizer (Hollow) – Diameter 10")
         self.geometry("940x720")
 
-        self.points = []     # list of (x,y,z)
-        self.voxels = set()  # set of (x,y,z)
+        self.points = []
+        self.voxels = set()
 
         # Preview controls
         self.max_preview_var = tk.IntVar(value=20000)    # cap how many voxels to plot
@@ -125,7 +115,6 @@ class TunnelApp(tk.Tk):
         self.init_plot()
 
     def create_widgets(self):
-        # ---------- Top row: point input + tunnel params ----------
         frm_top = ttk.Frame(self)
         frm_top.pack(fill="x", padx=10, pady=10)
 

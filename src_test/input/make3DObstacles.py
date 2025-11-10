@@ -1,6 +1,4 @@
 # voxel_grid.py
-# Requirements: numpy, pyvista, vtk, pyqt5 (or pyqt6)
-
 import numpy as np
 import pyvista as pv
 from dataclasses import dataclass
@@ -121,7 +119,6 @@ def load_voxel_grid(path: str, padding: int = 0) -> VoxelGrid:
 
 # ---------- Hardcoded main ----------
 def main():
-    # 🔧 CHANGE THIS PATH to your exported file once
     path = "input/data/shape_3d_3.txt"
 
     vg = load_voxel_grid(path, padding=0)
