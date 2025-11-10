@@ -114,12 +114,81 @@ def combined_within_track_trend(per_track_dicts: List[Dict[float, float]]):
 
     return X_plot, Y_plot
 
-    # --- Detailed runtime breakdown (stacked area) ---
-    plot_runtime_breakdown_stack_vs_ratio(
-        tables, labels,
-        out_path=os.path.join(out_dir, "runtime_breakdown_stack_vs_r_sm.png")
+def plot_runtime_breakdown_vs_ratio(tables: List[pd_db.DataFrame], out_path: str):
+    """
+    Mean runtime breakdown vs r_sm (no smoothing):
+      bottom→top: Step 1 (blue), Step 2 split (orange shades), Step 3 (green).
+      Step 2 sub-steps are scaled to exactly sum to Step 2 so there's no gap.
+    """
+    fig, ax = plt.subplots(figsize=(9, 6))
+
+    # Combine and clean data
+    all_df = pd_db.concat(tables, ignore_index=True)
+    all_df = all_df.replace([np.inf, -np.inf], np.nan).dropna(subset=["r_sm"])
+
+    # Round r_sm for grouping stability
+    all_df["r_sm_round"] = all_df["r_sm"].astype(float).round(2)
+    grp = (
+        all_df.groupby("r_sm_round", as_index=True)[[
+            "total_step1_s", "total_step2_s", "total_step3_s",
+            "total_proj_costs_only_s", "total_proj_dp_s", "total_proj_reproj_s"
+        ]]
+        .mean()
+        .sort_index()
     )
 
+    if grp.empty:
+        print("[warn] runtime breakdown: no finite data after grouping")
+        return
+
+    X = grp.index.values.astype(float)
+    step1 = np.nan_to_num(grp["total_step1_s"].values, nan=0.0)
+    step2 = np.nan_to_num(grp["total_step2_s"].values, nan=0.0)
+    step3 = np.nan_to_num(grp["total_step3_s"].values, nan=0.0)
+
+    # Raw Step 2 sub-steps (projection pieces)
+    p_costs  = np.nan_to_num(grp["total_proj_costs_only_s"].values, nan=0.0)
+    p_dp     = np.nan_to_num(grp["total_proj_dp_s"].values,         nan=0.0)
+    p_reproj = np.nan_to_num(grp["total_proj_reproj_s"].values,     nan=0.0)
+
+    # --- Scale sub-steps to exactly fill Step 2 (no gaps) ---
+    p_sum = p_costs + p_dp + p_reproj
+    with np.errstate(divide="ignore", invalid="ignore"):
+        w_costs  = np.where(p_sum > 0, p_costs  / p_sum, 1.0/3.0)
+        w_dp     = np.where(p_sum > 0, p_dp     / p_sum, 1.0/3.0)
+        w_reproj = np.where(p_sum > 0, p_reproj / p_sum, 1.0/3.0)
+
+    s2_costs  = w_costs  * step2
+    s2_dp     = w_dp     * step2
+    s2_reproj = w_reproj * step2
+
+    # --- Draw strictly bottom→top with contiguous fills ---
+    # 1) Step 1 base (blue)
+    ax.fill_between(X, 0.0, step1, color="#1f77b4", alpha=0.85, label="Primal Step")
+
+    # 2) Step 2 split (orange shades), stacked on top of Step 1
+    base = step1
+    ax.fill_between(X, base, base + s2_costs, color="#ffd199", alpha=0.95, label="Slack Step: costs_only")
+    base = base + s2_costs
+    ax.fill_between(X, base, base + s2_dp,    color="#ffab40", alpha=0.95, label="Slack Step: dp")
+    base = base + s2_dp
+    ax.fill_between(X, base, base + s2_reproj, color="#fb8c00", alpha=0.95, label="Slack Step: reproj")
+
+    # 3) Step 3 on top (green)
+    base_total = step1 + step2
+    ax.fill_between(X, base_total, base_total + step3, color="#2ca02c", alpha=0.85, label="Dual Step")
+
+    # Axes/legend
+    ax.set_xlabel("ratio r_sm = segments / M")
+    ax.set_ylabel("mean total time [s]")
+    ax.set_title("Mean runtime breakdown vs r_sm (fully stacked, no smoothing)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper left", fontsize=9, ncol=2, frameon=True)
+
+    plt.tight_layout()
+    ensure_dir(os.path.dirname(out_path))
+    plt.savefig(out_path, dpi=150)
+    plt.close(fig)
 
 
 
@@ -380,10 +449,16 @@ def main():
         normalize=True,
     )
 
-    plot_runtime_breakdown_vs_ratio(
-        tables, labels,
-        out_path=os.path.join(out_dir, "runtime_breakdown_vs_r_sm.png")
-    )
+    target = "hallway1"   # exact name or substring
+    tables_h1 = [t for t, lab in zip(tables, labels) if target in lab]
+
+    if not tables_h1:
+        print(f"[warn] no tracks matching '{target}'")
+    else:
+        plot_runtime_breakdown_vs_ratio(
+            tables_h1,
+            out_path=os.path.join(out_dir, "runtime_breakdown_stack_vs_r_sm_hallway1.png"),
+        )
 
     print(f"Saved plots in: {out_dir}")
 

@@ -52,6 +52,90 @@ def load_first_rows(track_dir: str) -> pd.DataFrame:
             print(f"[warn] {f}: {e}")
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
+def plot_runtime_breakdown_vs_segments_eff(tables: List[pd.DataFrame], out_path: str):
+    """
+    Mean runtime breakdown vs effective segments (no smoothing):
+      bottom→top: Step 1 (blue), Step 2 split (orange shades), Step 3 (green).
+      Step 2 sub-steps are scaled to exactly sum to Step 2 (no gaps).
+    """
+    fig, ax = plt.subplots(figsize=(9, 6))
+
+    # Combine all tracks
+    all_df = pd.concat(tables, ignore_index=True)
+    if all_df.empty or "segments_eff" not in all_df:
+        print("[warn] runtime breakdown: no data/segments_eff missing")
+        return
+
+    # Keep required columns and finite rows
+    cols = [
+        "segments_eff",
+        "total_step1_s", "total_step2_s", "total_step3_s",
+        "total_proj_costs_only_s", "total_proj_dp_s", "total_proj_reproj_s",
+    ]
+    all_df = all_df[cols].replace([np.inf, -np.inf], np.nan).dropna(subset=["segments_eff"])
+
+    # Group by effective segments (already integer) and average
+    grp = (all_df
+           .groupby("segments_eff", as_index=True)[[
+               "total_step1_s", "total_step2_s", "total_step3_s",
+               "total_proj_costs_only_s", "total_proj_dp_s", "total_proj_reproj_s",
+           ]]
+           .mean()
+           .sort_index())
+
+    if grp.empty:
+        print("[warn] runtime breakdown: empty after grouping")
+        return
+
+    X = grp.index.values.astype(float)
+    step1 = np.nan_to_num(grp["total_step1_s"].values, nan=0.0)
+    step2 = np.nan_to_num(grp["total_step2_s"].values, nan=0.0)
+    step3 = np.nan_to_num(grp["total_step3_s"].values, nan=0.0)
+
+    # Raw Step 2 sub-steps (projection pieces)
+    p_costs  = np.nan_to_num(grp["total_proj_costs_only_s"].values, nan=0.0)
+    p_dp     = np.nan_to_num(grp["total_proj_dp_s"].values,         nan=0.0)
+    p_reproj = np.nan_to_num(grp["total_proj_reproj_s"].values,     nan=0.0)
+
+    # Scale sub-steps to exactly fill Step 2 (avoid gaps/overlaps)
+    p_sum = p_costs + p_dp + p_reproj
+    with np.errstate(divide="ignore", invalid="ignore"):
+        w_costs  = np.where(p_sum > 0, p_costs  / p_sum, 1.0/3.0)
+        w_dp     = np.where(p_sum > 0, p_dp     / p_sum, 1.0/3.0)
+        w_reproj = np.where(p_sum > 0, p_reproj / p_sum, 1.0/3.0)
+
+    s2_costs  = w_costs  * step2
+    s2_dp     = w_dp     * step2
+    s2_reproj = w_reproj * step2
+
+    # --- Draw strictly bottom→top (fully stacked, no smoothing) ---
+    # Step 1 (blue)
+    ax.fill_between(X, 0.0, step1, color="#1f77b4", alpha=0.85, label="Primal Step")
+
+    # Step 2 split (orange shades) on top of Step 1
+    base = step1
+    ax.fill_between(X, base, base + s2_costs,  color="#ffd199", alpha=0.95, label="Slack Step: costs_only")
+    base = base + s2_costs
+    ax.fill_between(X, base, base + s2_dp,     color="#ffab40", alpha=0.95, label="Slack Step: dp")
+    base = base + s2_dp
+    ax.fill_between(X, base, base + s2_reproj, color="#fb8c00", alpha=0.95, label="Slack Step: reproj")
+
+    # Step 3 (green) on top
+    base_total = step1 + step2
+    ax.fill_between(X, base_total, base_total + step3, color="#2ca02c", alpha=0.85, label="Dual Step")
+
+    ax.set_xlabel("effective segments = max(30, round(ratio * M))")
+    ax.set_ylabel("mean total time [s]")
+    ax.set_title("Mean runtime breakdown vs effective segments (fully stacked, no smoothing)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper left", fontsize=9, ncol=2, frameon=True)
+
+    plt.tight_layout()
+    ensure_dir(os.path.dirname(out_path))
+    plt.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
 def normalize_series_01(d: Dict[float, float]) -> Dict[float, float]:
     """Baseline-anchored trend: subtract first finite value, scale by max |Δ|."""
     if not d:
@@ -282,6 +366,15 @@ def main():
         out_path=os.path.join(out_dir, "iterations_vs_segments_eff.png"),
         normalize=False,
     )
+
+    target = "hallway1"   # exact name or substring
+    tables_h1 = [t for t, lab in zip(tables, labels) if target in lab]
+
+    plot_runtime_breakdown_vs_segments_eff(
+        tables_h1,
+        out_path=os.path.join(out_dir, "runtime_breakdown_stack_vs_segments_eff.png"),
+    )
+
 
     print(f"Saved plots in: {out_dir}")
 

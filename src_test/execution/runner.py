@@ -1,5 +1,5 @@
 def run_admm_trajectory_optimization(config, DEBUG=False):    
-    from input.make3DObstacles import load_voxel_grid   # or: from voxel_grid import load_voxel_grid
+    from input.make3DObstacles import load_voxel_grid
     from pathfinder.AStar3D import astar_3d
     from utils.path_manipulation import keep_turns_np, reduce_turns_by_los, sample_every_k
     import os
@@ -24,19 +24,15 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
     import time
 
     def pv_surface_from_grid(mask3d: np.ndarray, origin=(0,0,0)):
-        """
-        mask3d: bool array (nx, ny, nz), True = occupied.
-        Returns a PyVista surface extracted from the occupied volume.
-        """
         nx, ny, nz = mask3d.shape
         ox, oy, oz = origin
         img = pv.ImageData(dimensions=(nx+1, ny+1, nz+1),
                         spacing=(1,1,1),
                         origin=(ox, oy, oz))
-        # VTK expects cell data in Fortran order
+        
         img.cell_data["occ"] = mask3d.astype(np.uint8).ravel(order="F")
-        vol = img.threshold(0.5, scalars="occ")     # keep occupied cells
-        return vol.extract_surface()                # outer surface only
+        vol = img.threshold(0.5, scalars="occ")
+        return vol.extract_surface()
     
 
     def visualize_voxelgrid_with_path(
@@ -52,7 +48,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         mark_turns=True,
         turn_color="orange",
         turn_scale=1.6,
-        # --- NEW: convex decomposition visualization ---
+        
         A_list=None,                 # list of (m_i, 3) arrays
         b_list=None,                 # list of (m_i, 1) or (m_i,) arrays
         show_decomposition=True,
@@ -60,14 +56,6 @@ def run_admm_trajectory_optimization(config, DEBUG=False):
         decomp_opacity=0.18,
         smooth_shading=True,
     ):
-        """
-        vg: VoxelGrid (with vg.grid bool and vg.info.origin, vg.info.to_coord(idx))
-        path_idx: list/array of (i,j,k) indices (A* output) or None
-        turns_idx: list/array of (i,j,k) turn points
-        A_list, b_list: convex decomposition halfspaces per path segment
-                        Each A is (m,3), b is (m,1) or (m,)
-                        Inequality format returned by your binding: A x - b <= 0
-        """
         surf = pv_surface_from_grid(vg.grid, origin=vg.info.origin)
 
         p = pv.Plotter()

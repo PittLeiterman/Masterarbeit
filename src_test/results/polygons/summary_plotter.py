@@ -1,284 +1,325 @@
 #!/usr/bin/env python3
 # scripts/plot_M_all.py
 """
-Analyze the impact of the number of corridor polytopes M (num_polytopes)
-when segments are tied to M by a fixed ~110% ratio with a hard lower bound of 30.
-✅ Unified view: NO split into "floor" and "scaling" regimes. Everything is pooled.
+Analysis: runtime vs number of corridor polytopes M.
 
-We produce one family of plots (one figure per metric), each showing:
-  • Thin colored lines: one curve per shape (optionally z-scored per shape)
-  • Thick black line: a smoothed, monotone combined trend across shapes vs M
-  • Optional shaded band: SEM or STD around the combined mean (smoothed)
+Produces:
+  1) Total convergence time vs M (per-track curves + black quadratic trend)
+  2) Mean iteration time vs M
+  3) Iterations vs M
+  4) Curviness ratio vs M
+  5) Stacked runtime breakdown vs M for a chosen track (Step 1, Step 2 split, Step 3)
 
-Metrics vs M:
-  1) total_time = iters * mean_iter_total_s
-  2) total_time_per_seg = total_time / num_segments_cfg
-  3) total_time_per_poly = total_time / num_polytopes
-  4) mean_iter_total_s
-  5) mean_proj_total_s  (projection cost/iter)
-  6) curviness_ratio (L/D)  [not normalized by default; z-score toggle applies though]
-
-Usage:
-  python3 scripts/plot_M_all.py
-
-Assumes directory structure:
-  results/M/
+Directory layout assumed:
+  results/polygons/
     hallway1/*.csv
     tunnel1/*.csv
     ...
 
-Each CSV contains (at least) the columns shown in your example.
+Each CSV should contain the columns used below (like your other scripts).
 """
 
 import os
 import glob
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# =========================
+# ======================
 # Configuration
-# =========================
-BASE_DIR = "results/polygons"        # directory with shape subfolders
-OUT_SUBDIR = "plots_M"        # output subdir inside BASE_DIR
+# ======================
+BASE_DIR               = "results/polygons"
+OUT_SUBDIR             = "plots_M_all"
+TARGET_BREAKDOWN_LABEL = "forest2"     # substring to pick the track for the stacked plot
 
-# Normalize per-shape lines before combining? ("none" or "zscore")
-# Z-scoring is done PER SHAPE across its M values for that metric (makes overlays fair).
-NORMALIZE_MODE = "zscore"
+# Summary line style: degree-2 gives a gentle bend. Falls back to linear if not enough points.
+SUMMARY_TREND_DEGREE   = 2              # 1 = straight OLS, 2 = slightly bendy quadratic
+SUMMARY_TREND_SAMPLES  = 200            # dense x-grid for the black trend line
 
-# Thick combined line options (to avoid "jumpy" means)
-SMOOTH_COMBINED = True        # moving average on the combined mean
-SMOOTH_WINDOW   = 3           # odd integer >=1
-ENFORCE_MONOTONE = "auto"     # None|"increasing"|"decreasing"|"auto"
-SHOW_SHADED_BAND = True       # show uncertainty around combined line
-BAND_KIND = "sem"             # "sem" or "std"
-BAND_SMOOTH = True            # smooth the band with moving average (no monotone)
+MEAN = False
 
-# ============ helpers ============
-
+# ======================
+# Helpers
+# ======================
 def ensure_dir(p: str):
     os.makedirs(p, exist_ok=True)
 
-def zscore_series(series: Dict[int, float]) -> Dict[int, float]:
-    if not series or len(series) < 2:
-        return series
-    vals = np.array(list(series.values()), dtype=float)
-    mu, sd = float(np.mean(vals)), float(np.std(vals, ddof=1))
-    if sd == 0:
-        return {k: 0.0 for k in series}
-    return {k: float((v - mu) / sd) for k, v in series.items()}
+def normalize_series_01(d: Dict[float, float]) -> Dict[float, float]:
+    """Baseline-anchored trend: subtract first finite value, scale by max |Δ|."""
+    if not d:
+        return {}
+    xs = np.array(sorted(d.keys()), float)
+    ys = np.array([d[x] for x in xs], float)
+    ys = np.where(np.isfinite(ys), ys, np.nan)
+    finite_idx = np.where(np.isfinite(ys))[0]
+    if finite_idx.size == 0:
+        return {float(x): 0.0 for x in xs}
+    y0 = ys[finite_idx[0]]
+    deltas = ys - y0
+    max_abs = np.nanmax(np.abs(deltas))
+    if not np.isfinite(max_abs) or max_abs <= 1e-12:
+        return {float(x): 0.0 for x in xs}
+    deltas /= max_abs
+    return {float(x): float(y) if np.isfinite(y) else 0.0 for x, y in zip(xs, deltas)}
 
-def moving_average(y: np.ndarray, win: int) -> np.ndarray:
-    if win <= 1 or win % 2 == 0 or y.size == 0:
-        return y.copy()
-    k = np.ones(win, dtype=float) / win
-    pad = win // 2
-    ypad = np.pad(y, (pad, pad), mode="edge")
-    return np.convolve(ypad, k, mode="valid")
+def load_first_rows(track_dir: str) -> pd.DataFrame:
+    frames = []
+    for f in sorted(glob.glob(os.path.join(track_dir, "*.csv"))):
+        try:
+            df = pd.read_csv(f)
+            if not df.empty:
+                frames.append(df.iloc[[0]].copy())
+        except Exception as e:
+            print(f"[warn] {f}: {e}")
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-def pava_isotonic(y: np.ndarray, increasing: bool = True) -> np.ndarray:
-    """Pool-Adjacent-Violators for monotone fit (unit weights)."""
-    if y.size == 0:
-        return y.copy()
-    if not increasing:
-        return -pava_isotonic(-y, increasing=True)
-    y = y.astype(float)
-    n = len(y)
-    level = y.copy()
-    weight = np.ones(n, dtype=float)
-    i = 0
-    while i < n - 1:
-        if level[i] <= level[i + 1] + 1e-15:
-            i += 1
-            continue
-        j = i
-        while j >= 0 and level[j] > level[j + 1] + 1e-15:
-            wsum = weight[j] + weight[j + 1]
-            avg = (weight[j] * level[j] + weight[j + 1] * level[j + 1]) / wsum
-            level[j] = level[j + 1] = avg
-            weight[j] = weight[j + 1] = wsum
-            j -= 1
-        i += 1
-    return level
+def derive(df: pd.DataFrame, track_name="") -> pd.DataFrame:
+    out = df.copy()
+    need = [
+        "iters","mean_iter_total_s","num_polytopes","ratio","num_segments_cfg",
+        "mean_step1_s","mean_step2_s","mean_step3_s",
+        "mean_proj_total_s","mean_proj_costs_only_s","mean_proj_dp_s","mean_proj_reproj_s",
+        "curviness_ratio"
+    ]
+    for c in need:
+        if c not in out:
+            out[c] = np.nan
 
-def smooth_trend(xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
-    if ys.size == 0:
-        return ys
-    out = ys.copy()
-    if SMOOTH_COMBINED and out.size >= 2:
-        out = moving_average(out, SMOOTH_WINDOW)
-    if ENFORCE_MONOTONE:
-        if ENFORCE_MONOTONE == "auto":
-            inc = pava_isotonic(out, increasing=True)
-            dec = pava_isotonic(out, increasing=False)
-            e_inc = float(np.mean((out - inc) ** 2))
-            e_dec = float(np.mean((out - dec) ** 2))
-            out = inc if e_inc <= e_dec else dec
-        else:
-            out = pava_isotonic(out, increasing=(ENFORCE_MONOTONE == "increasing"))
+    M = out["num_polytopes"].astype(float)
+    r_csv = out["ratio"].astype(float)
+    seg_cfg = out["num_segments_cfg"].astype(float) if "num_segments_cfg" in out else np.full(len(out), np.nan)
+    # Effective segments (matches your other scripts)
+    seg_eff = np.where(np.isfinite(r_csv) & np.isfinite(M), np.maximum(30.0, np.round(r_csv * M)), seg_cfg)
+    out["segments_eff"] = seg_eff.astype(int)
+
+    out["total_time"] = out["iters"].astype(float) * out["mean_iter_total_s"].astype(float)
+    out["total_step1_s"] = out["iters"].astype(float) * out["mean_step1_s"].astype(float)
+    out["total_step2_s"] = out["iters"].astype(float) * out["mean_step2_s"].astype(float)
+    out["total_step3_s"] = out["iters"].astype(float) * out["mean_step3_s"].astype(float)
+    out["total_proj_total_s"]      = out["iters"].astype(float) * out["mean_proj_total_s"].astype(float)
+    out["total_proj_costs_only_s"] = out["iters"].astype(float) * out["mean_proj_costs_only_s"].astype(float)
+    out["total_proj_dp_s"]         = out["iters"].astype(float) * out["mean_proj_dp_s"].astype(float)
+    out["total_proj_reproj_s"]     = out["iters"].astype(float) * out["mean_proj_reproj_s"].astype(float)
     return out
 
-def combine_stats(per_shape_series: List[Dict[int, float]]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Aggregate across shapes at each M.
-    Returns Ms (sorted), mean, std, sem.
-    """
+def per_track_series_M(df: pd.DataFrame, ycol: str) -> Dict[int, float]:
+    """Average ycol per integer M within a track."""
+    if "num_polytopes" not in df or ycol not in df:
+        return {}
+    sub = df[["num_polytopes", ycol]].replace([np.inf, -np.inf], np.nan).dropna()
+    if sub.empty:
+        return {}
+    sub["M_int"] = sub["num_polytopes"].astype(float).round().astype(int)
+    g = sub.groupby("M_int", as_index=False)[ycol].mean().sort_values("M_int")
+    return {int(m): float(v) for m, v in zip(g["M_int"], g[ycol])}
+
+def combine_means(per_track_dicts: List[Dict[int, float]]) -> Tuple[np.ndarray, np.ndarray]:
+    """Combine multiple series by averaging at each M."""
     bucket: Dict[int, List[float]] = {}
-    for d in per_shape_series:
+    for d in per_track_dicts:
         for m, v in d.items():
             bucket.setdefault(int(m), []).append(float(v))
     if not bucket:
-        return np.array([], int), np.array([], float), np.array([], float), np.array([], float)
+        return np.array([], int), np.array([], float)
     Ms = np.array(sorted(bucket.keys()), dtype=int)
-    lists = [bucket[m] for m in Ms]
-    mean = np.array([np.mean(v) for v in lists], dtype=float)
-    std  = np.array([np.std(v, ddof=1) if len(v) > 1 else 0.0 for v in lists], dtype=float)
-    sem  = np.array([s / np.sqrt(len(v)) if len(v) > 0 else 0.0 for s, v in zip(std, lists)], dtype=float)
-    return Ms, mean, std, sem
+    mu = np.array([np.mean(bucket[m]) for m in Ms], float)
+    return Ms, mu
 
-def plot_metric(per_shape_series: List[Dict[int, float]],
-                labels: List[str],
-                metric_name: str,
-                ylab: str,
-                out_path: str,
-                append_z_hint: bool):
-    fig, ax = plt.subplots()
+# ======================
+# Line plots (per-track + combined bendy trend)
+# ======================
+def _fit_and_plot_bendy_trend(ax, Ms: np.ndarray, mean: np.ndarray, label: str = "combined trend"):
+    """Fit a degree-2 polynomial to (Ms, mean) and plot a smooth curve.
+       Falls back to linear if not enough points."""
+    Ms = Ms.astype(float)
+    valid = np.isfinite(Ms) & np.isfinite(mean)
+    Ms, mean = Ms[valid], mean[valid]
+    if Ms.size < 2:
+        return
+    deg = SUMMARY_TREND_DEGREE if Ms.size > SUMMARY_TREND_DEGREE else 1
+    coeffs = np.polyfit(Ms, mean, deg=deg)
+    x_dense = np.linspace(Ms.min(), Ms.max(), SUMMARY_TREND_SAMPLES)
+    y_dense = np.polyval(coeffs, x_dense)
+    ax.plot(x_dense, y_dense, color="k", lw=3.0, label=f"{label} (deg {deg})")
 
-    # per-shape thin curves
-    for d, lab in zip(per_shape_series, labels):
+def plot_lines_trend_M(per_track_dicts: List[Dict[int, float]],
+                       labels: List[str],
+                       ylab: str,
+                       title: str,
+                       out_path: str,
+                       normalize: bool = False):
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    # Optional baseline-anchoring per track
+    dicts_to_plot = [normalize_series_01(d) for d in per_track_dicts] if normalize else per_track_dicts
+    if normalize:
+        ylab = f"{ylab} (baseline-anchored)"
+
+    # Per-track lines
+    for d, lab in zip(dicts_to_plot, labels):
         if not d:
             continue
-        X = np.array(sorted(d.keys()), dtype=int)
-        Y = np.array([d[m] for m in X], dtype=float)
-        ax.plot(X, Y, "-o", linewidth=1.2, alpha=0.75, label=lab)
+        X = np.array(sorted(d.keys()), float)
+        Y = np.array([d[x] for x in X], float)
+        ax.plot(X, Y, lw=1.6, alpha=0.6, label=lab)
 
-    # combined smoothed trend + uncertainty
-    Ms, mean, std, sem = combine_stats(per_shape_series)
-    if Ms.size > 0:
-        band = sem if BAND_KIND == "sem" else std
-        if BAND_SMOOTH and SMOOTH_COMBINED and Ms.size >= 2:
-            band_s = moving_average(band, SMOOTH_WINDOW)
-        else:
-            band_s = band
-        mean_s = smooth_trend(Ms, mean)
-        if SHOW_SHADED_BAND:
-            ax.fill_between(Ms, mean_s - band_s, mean_s + band_s, alpha=0.15, lw=0)
-        ax.plot(Ms, mean_s, "-", linewidth=3.0, color="k", label="combined (trend)")
+    # Combined bendy trend on across-track mean
+    Ms, mean = combine_means(dicts_to_plot)
+    if Ms.size > 1 and MEAN:
+        _fit_and_plot_bendy_trend(ax, Ms, mean, label="combined trend")
 
     ax.set_xlabel("num polytopes (M)")
-    ax.set_ylabel(ylab + (" (z-score)" if append_z_hint and NORMALIZE_MODE == "zscore" else ""))
-    ax.set_title(f"{metric_name} vs M")
-    ax.grid(True, which="both", alpha=0.3)
-    if any(d for d in per_shape_series):
+    ax.set_ylabel(ylab)
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    if any(d for d in dicts_to_plot):
         ax.legend(ncol=2, fontsize=9)
     plt.tight_layout()
     ensure_dir(os.path.dirname(out_path))
     plt.savefig(out_path, dpi=150)
     plt.close(fig)
 
-def load_first_rows(shape_dir: str) -> pd.DataFrame:
-    frames = []
-    for f in sorted(glob.glob(os.path.join(shape_dir, "*.csv"))):
-        try:
-            df = pd.read_csv(f)
-            if not df.empty:
-                frames.append(df.iloc[[0]].copy())
-        except Exception as e:
-            print(f"[warn] could not read {f}: {e}")
-    if frames:
-        return pd.concat(frames, ignore_index=True)
-    return pd.DataFrame()
+# ======================
+# Stacked breakdown vs M (no smoothing, no gaps)
+# ======================
+def plot_runtime_breakdown_vs_M(tables: List[pd.DataFrame], out_path: str):
+    """
+    Mean runtime breakdown vs M (no smoothing):
+      bottom→top: Step 1 (blue), Step 2 split (orange shades), Step 3 (green).
+      Step 2 sub-steps are scaled to exactly sum to Step 2 (no gaps).
+    """
+    fig, ax = plt.subplots(figsize=(9, 6))
 
-def derive_columns(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
+    all_df = pd.concat(tables, ignore_index=True)
+    all_df = all_df.replace([np.inf, -np.inf], np.nan).dropna(subset=["num_polytopes"])
 
-    # derived totals
-    if "iters" in out and "mean_iter_total_s" in out:
-        out["total_time"] = out["iters"].astype(float) * out["mean_iter_total_s"].astype(float)
-    else:
-        out["total_time"] = np.nan
+    # Group by integer M and average
+    all_df["M_int"] = all_df["num_polytopes"].astype(float).round().astype(int)
+    cols = [
+        "total_step1_s","total_step2_s","total_step3_s",
+        "total_proj_costs_only_s","total_proj_dp_s","total_proj_reproj_s"
+    ]
+    grp = all_df.groupby("M_int", as_index=True)[cols].mean().sort_index()
+    if grp.empty:
+        print("[warn] runtime breakdown vs M: empty after grouping")
+        return
 
-    # per-size normalizations
-    if "num_segments_cfg" in out:
-        out["total_time_per_seg"] = out["total_time"] / out["num_segments_cfg"].clip(lower=1)
-    else:
-        out["total_time_per_seg"] = np.nan
+    X = grp.index.values.astype(float)
+    step1 = np.nan_to_num(grp["total_step1_s"].values, nan=0.0)
+    step2 = np.nan_to_num(grp["total_step2_s"].values, nan=0.0)
+    step3 = np.nan_to_num(grp["total_step3_s"].values, nan=0.0)
 
-    if "num_polytopes" in out:
-        out["total_time_per_poly"] = out["total_time"] / out["num_polytopes"].clip(lower=1)
-    else:
-        out["total_time_per_poly"] = np.nan
+    p_costs  = np.nan_to_num(grp["total_proj_costs_only_s"].values, nan=0.0)
+    p_dp     = np.nan_to_num(grp["total_proj_dp_s"].values,         nan=0.0)
+    p_reproj = np.nan_to_num(grp["total_proj_reproj_s"].values,     nan=0.0)
 
-    # ensure expected columns
-    for col in ["mean_iter_total_s", "curviness_ratio", "mean_proj_total_s", "num_polytopes"]:
-        if col not in out:
-            out[col] = np.nan
+    # Scale sub-steps to fill Step 2 exactly
+    p_sum = p_costs + p_dp + p_reproj
+    with np.errstate(divide="ignore", invalid="ignore"):
+        w_costs  = np.where(p_sum > 0, p_costs  / p_sum, 1.0/3.0)
+        w_dp     = np.where(p_sum > 0, p_dp     / p_sum, 1.0/3.0)
+        w_reproj = np.where(p_sum > 0, p_reproj / p_sum, 1.0/3.0)
+    s2_costs  = w_costs  * step2
+    s2_dp     = w_dp     * step2
+    s2_reproj = w_reproj * step2
 
-    # integer-ish M for keys
-    out["M"] = out["num_polytopes"].astype(float).round().astype("Int64")
-    return out
+    # Draw stacked fills (contiguous)
+    ax.fill_between(X, 0.0, step1, color="#1f77b4", alpha=0.85, label="Primal Step")
 
-def dict_by_M(sub: pd.DataFrame, col: str) -> Dict[int, float]:
-    if col not in sub:
-        return {}
-    d: Dict[int, float] = {}
-    for m, v in zip(sub["M"], sub[col]):
-        if pd.isna(m) or pd.isna(v):
-            continue
-        mv, vv = int(m), float(v)
-        if np.isfinite(vv):
-            d[mv] = vv
-    if NORMALIZE_MODE == "zscore":
-        d = zscore_series(d)
-    return d
+    base = step1
+    ax.fill_between(X, base, base + s2_costs,  color="#ffd199", alpha=0.95, label="Slack Step: costs_only")
+    base = base + s2_costs
+    ax.fill_between(X, base, base + s2_dp,     color="#ffab40", alpha=0.95, label="Slack Step: dp")
+    base = base + s2_dp
+    ax.fill_between(X, base, base + s2_reproj, color="#fb8c00", alpha=0.95, label="Slack Step: reproj")
 
-# ============ main ============
+    base_total = step1 + step2
+    ax.fill_between(X, base_total, base_total + step3, color="#2ca02c", alpha=0.85, label="Dual Step")
 
+    ax.set_xlabel("num polytopes (M)")
+    ax.set_ylabel("mean total time [s]")
+    ax.set_title("Mean runtime breakdown vs M (fully stacked, no smoothing)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper left", fontsize=9, ncol=2, frameon=True)
+
+    plt.tight_layout()
+    ensure_dir(os.path.dirname(out_path))
+    plt.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+# ======================
+# Main
+# ======================
 def main():
     base = BASE_DIR
     if not os.path.isdir(base):
         raise SystemExit(f"Not a directory: {base}")
+    track_dirs = [d for d in sorted(glob.glob(os.path.join(base, "*"))) if os.path.isdir(d)]
+    if not track_dirs:
+        raise SystemExit(f"No track subfolders in {base}")
 
-    shape_dirs = [d for d in sorted(glob.glob(os.path.join(base, "*"))) if os.path.isdir(d)]
-    if not shape_dirs:
-        raise SystemExit(f"No shape subfolders in {base}")
-
-    labels = [os.path.basename(d.rstrip(os.sep)) for d in shape_dirs]
-    shape_tables: List[pd.DataFrame] = []
-
-    for sd in shape_dirs:
-        df = load_first_rows(sd)
-        if df.empty:
-            shape_tables.append(pd.DataFrame())
-            continue
-        shape_tables.append(derive_columns(df))
+    labels = [os.path.basename(d.rstrip(os.sep)) for d in track_dirs]
+    tables: List[pd.DataFrame] = []
+    for td, lab in zip(track_dirs, labels):
+        df = load_first_rows(td)
+        tables.append(derive(df, track_name=lab) if not df.empty else pd.DataFrame())
 
     out_dir = os.path.join(base, OUT_SUBDIR)
     ensure_dir(out_dir)
 
-    # Build per-shape dicts (pooled across ALL data; no regime split)
-    def build(metric: str) -> List[Dict[int, float]]:
+    def build_M(ycol: str) -> List[Dict[int, float]]:
         out: List[Dict[int, float]] = []
-        for df in shape_tables:
-            if df.empty:
-                out.append({})
-                continue
-            out.append(dict_by_M(df[df["M"].notna()], metric))
+        for df in tables:
+            out.append(per_track_series_M(df, ycol) if not df.empty else {})
         return out
 
-    series_map = {
-        "Total convergence time":           ("total_time",            "total time" if NORMALIZE_MODE!="none" else "total time [s]", "total_time_vs_M.png", True),
-        "Total time per segment":           ("total_time_per_seg",    "total time per segment",                                  "total_time_per_seg_vs_M.png", True),
-        "Total time per polytope":          ("total_time_per_poly",   "total time per polytope",                                 "total_time_per_poly_vs_M.png", True),
-        "Mean iteration time":              ("mean_iter_total_s",     "mean time per iteration" if NORMALIZE_MODE!="none" else "mean time per iteration [s]", "mean_iter_time_vs_M.png", True),
-        "Projection time per iteration":    ("mean_proj_total_s",     "projection time per iteration" if NORMALIZE_MODE!="none" else "projection time per iteration [s]", "proj_time_vs_M.png", True),
-        "Curviness ratio (L/D)":            ("curviness_ratio",       "curviness ratio (L/D)",                                   "curviness_vs_M.png", False),
-    }
+    # --- Line plots (vs M) ---
+    series_total = build_M("total_time")
+    plot_lines_trend_M(
+        series_total, labels,
+        ylab="total time [s]",
+        title="Total convergence time vs M",
+        out_path=os.path.join(out_dir, "total_time_vs_M.png"),
+        normalize=False,
+    )
 
-    for title, (col, ylab, fname, zhint) in series_map.items():
-        per_shape_series = build(col)
-        plot_metric(per_shape_series, labels, title, ylab, os.path.join(out_dir, fname), append_z_hint=zhint)
+    series_iter = build_M("mean_iter_total_s")
+    plot_lines_trend_M(
+        series_iter, labels,
+        ylab="mean iteration time [s]",
+        title="Mean iteration time vs M",
+        out_path=os.path.join(out_dir, "mean_iter_time_vs_M.png"),
+        normalize=False,
+    )
+
+    series_iters = build_M("iters")
+    plot_lines_trend_M(
+        series_iters, labels,
+        ylab="iterations [count]",
+        title="Iterations until convergence vs M",
+        out_path=os.path.join(out_dir, "iterations_vs_M.png"),
+        normalize=False,
+    )
+
+    series_curv = build_M("curviness_ratio")
+    plot_lines_trend_M(
+        series_curv, labels,
+        ylab="curviness ratio",
+        title="Curviness ratio vs M",
+        out_path=os.path.join(out_dir, "curviness_ratio_vs_M.png"),
+        normalize=False,
+    )
+
+    # --- Stacked breakdown for a selected track ---
+    tables_target = [t for t, lab in zip(tables, labels) if TARGET_BREAKDOWN_LABEL in lab]
+    if not tables_target:
+        print(f"[warn] no tracks matching '{TARGET_BREAKDOWN_LABEL}' for stacked breakdown")
+    else:
+        plot_runtime_breakdown_vs_M(
+            tables_target,
+            out_path=os.path.join(out_dir, f"runtime_breakdown_stack_vs_M_{TARGET_BREAKDOWN_LABEL}.png"),
+        )
 
     print(f"Saved plots in: {out_dir}")
 
