@@ -154,6 +154,24 @@ def project_points_to_polyhedron_qp3d(P, A, b, tol=1e-9, max_as_iters=8, warm_ac
             warm = I
     return X, d2, active_sets
 
+def project_segment_by_translation(C_seg, A, b, tol=1e-9):
+    C = np.asarray(C_seg, float).reshape(-1, 3)
+    A = np.asarray(A, float)
+    b = np.asarray(b, float).reshape(-1)
+
+    mxi = np.max(A @ C.T, axis=1)
+    d   = b - mxi
+
+    if np.all(d >= -tol):
+        return C.copy()
+
+    
+    x0,x1,x2,_,_,_,_ = qp3d_point_njit(np.zeros(3), A, d, tol, 8, -1,-1,-1)
+    t_star = np.array([x0,x1,x2], dtype=float)
+
+    return C + t_star
+
+
 
 def project_segments_with_coverage(C_segments, A_list, b_list, *,
                                    tol=1e-9, max_as_iters=8,
@@ -260,9 +278,7 @@ def project_segments_with_coverage(C_segments, A_list, b_list, *,
                 if A.shape[0] == 0:
                     X = C.copy()
                 else:
-                    X, _ , _ = project_points_to_polyhedron_qp3d_numba(
-                        C, A, b, tol=tol, max_as_iters=max_as_iters, warm_active_seq=warm_active_seq
-                    )
+                    X = project_segment_by_translation(C, A, b, tol=tol)
                 Z_blocks.append(X)
 
     if len(Z_blocks) != S:
@@ -274,9 +290,7 @@ def project_segments_with_coverage(C_segments, A_list, b_list, *,
             if A.shape[0] == 0:
                 X = C.copy()
             else:
-                X, _ , _ = project_points_to_polyhedron_qp3d_numba(
-                    C, A, b, tol=tol, max_as_iters=max_as_iters, warm_active_seq=warm_active_seq
-                )
+                X = project_segment_by_translation(C, A, b, tol=tol)
             Z_blocks.append(X)
 
     Z_traj = np.vstack(Z_blocks).reshape(S * ctrl_per_seg, 3)

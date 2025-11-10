@@ -16,5 +16,5 @@
     "eps_abs_pri": 1e-4,
     "eps_abs_dual": 1e-4,
     "eps_rel": 1e-2,
-    "corners": 0
+    "corners": 3
 }
