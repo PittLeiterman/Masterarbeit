@@ -317,33 +317,33 @@ def plot_lines_trend_ratio(per_track_dicts: List[Dict[float, float]],
     # Combined mean + OLS regression (black line)
     # --- Combined trend: mean of all tracks at shared x, then regression ---
     # Build a common x-grid across all tracks
-    all_x = np.unique(np.concatenate([np.fromiter(d.keys(), float) for d in per_track_dicts if d]))
-    if all_x.size >= 2:
-        x_grid = np.linspace(all_x.min(), all_x.max(), 100)
-        y_values = []
+    # all_x = np.unique(np.concatenate([np.fromiter(d.keys(), float) for d in per_track_dicts if d]))
+    # if all_x.size >= 2:
+    #     x_grid = np.linspace(all_x.min(), all_x.max(), 100)
+    #     y_values = []
 
-        # Interpolate each track on the shared grid
-        for d in per_track_dicts:
-            if len(d) < 2:
-                continue
-            X = np.array(sorted(d.keys()), float)
-            Y = np.array([d[x] for x in X], float)
-            # interpolate only where valid
-            mask = (x_grid >= X.min()) & (x_grid <= X.max())
-            yi = np.full_like(x_grid, np.nan, dtype=float)
-            yi[mask] = np.interp(x_grid[mask], X, Y)
-            y_values.append(yi)
+    #     # Interpolate each track on the shared grid
+    #     for d in per_track_dicts:
+    #         if len(d) < 2:
+    #             continue
+    #         X = np.array(sorted(d.keys()), float)
+    #         Y = np.array([d[x] for x in X], float)
+    #         # interpolate only where valid
+    #         mask = (x_grid >= X.min()) & (x_grid <= X.max())
+    #         yi = np.full_like(x_grid, np.nan, dtype=float)
+    #         yi[mask] = np.interp(x_grid[mask], X, Y)
+    #         y_values.append(yi)
 
-        if y_values:
-            Y = np.vstack(y_values)
-            y_mean = np.nanmean(Y, axis=0)
+    #     if y_values:
+    #         Y = np.vstack(y_values)
+    #         y_mean = np.nanmean(Y, axis=0)
 
-            # Fit simple linear regression on mean curve
-            valid = np.isfinite(y_mean)
-            if np.sum(valid) > 1:
-                slope, intercept = np.polyfit(x_grid[valid], y_mean[valid], 1)
-                y_fit = slope * x_grid + intercept
-                ax.plot(x_grid, y_fit, color="k", lw=3.0, label="combined trend (OLS)")
+    #         # Fit simple linear regression on mean curve
+    #         valid = np.isfinite(y_mean)
+    #         if np.sum(valid) > 1:
+    #             slope, intercept = np.polyfit(x_grid[valid], y_mean[valid], 1)
+    #             y_fit = slope * x_grid + intercept
+    #             ax.plot(x_grid, y_fit, color="k", lw=3.0, label="combined trend (OLS)")
 
 
 
@@ -416,7 +416,7 @@ def main():
         ylab="total time [s]",
         title="Total convergence time vs r_sm",
         out_path=os.path.join(out_dir, "total_time_vs_r_sm.png"),
-        normalize=True,
+        normalize = False,
     )
 
     series_curviness_rsm = build_ratio("curviness_ratio", "sm")
@@ -446,7 +446,7 @@ def main():
         ylab="iterations [count]",
         title="Iterations until convergence vs r_sm",
         out_path=os.path.join(out_dir, "iterations_vs_r_sm.png"),
-        normalize=True,
+        normalize=False,
     )
 
     target = "hallway1"   # exact name or substring

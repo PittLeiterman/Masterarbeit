@@ -12,7 +12,7 @@
     "num_segments": 30,
     "segment_ratio": 1.1,
     "m_per_seg": 30,
-    "runtime_summary_csv": "results/rho/forest1/e8.csv",
+    "runtime_summary_csv": "results/testruns/forest1/e8.csv",
     "eps_abs_pri": 1e-4,
     "eps_abs_dual": 1e-4,
     "eps_rel": 1e-2,

@@ -235,11 +235,11 @@ def plot_lines_trend(per_track_dicts: List[Dict[int, float]],
             ax.plot(X, Y, lw=1.2, alpha=0.6, label=lab)
 
     # Combined OLS regression (black line)
-    Xc, mean = combine_means(per_track_dicts)
-    if Xc.size > 1:
-        slope, intercept = np.polyfit(Xc, mean, 1)
-        y_reg = slope * Xc + intercept
-        ax.plot(Xc, y_reg, color="k", lw=3.0, label="combined OLS trend")
+    # Xc, mean = combine_means(per_track_dicts)
+    # if Xc.size > 1:
+    #     slope, intercept = np.polyfit(Xc, mean, 1)
+    #     y_reg = slope * Xc + intercept
+    #     ax.plot(Xc, y_reg, color="k", lw=3.0, label="combined OLS trend")
 
     ax.set_xlabel("effective segments = max(30, round(ratio * M))")
     ax.set_ylabel(ylab)
