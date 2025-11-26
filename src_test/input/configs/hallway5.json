@@ -10,11 +10,11 @@
     "v_start": [0.0, 0.0, 0.0],
     "v_end": [0.0, 0.0, 0.0],
     "num_segments": 30,
-    "segment_ratio": 1.7,
+    "segment_ratio": 1.1,
     "m_per_seg": 30,
     "runtime_summary_csv": "results/testruns/hallway5.csv",
     "eps_abs_pri": 1e-4,
     "eps_abs_dual": 1e-4,
     "eps_rel": 1e-2,
-    "corners": 0
+    "corners": 1
 }

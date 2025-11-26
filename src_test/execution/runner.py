@@ -37,28 +37,25 @@ def run_admm_trajectory_optimization(config, DEBUG=False, PROJECTIONS=False):
         path_xyz=None,
         plotPath=True,
         tube_radius=0.2,
-        grid_opacity=0.25,
+        grid_opacity=0.20,
         grid_color="blue",
         turns_idx=None,
         mark_start_end=True,
         mark_turns=True,
         turn_color="orange",
-        turn_scale=1.6,
+        turn_scale=3,
         A_list=None,
         b_list=None,
         show_decomposition=True,
         decomp_color="yellow",
         decomp_opacity=0.18,
         smooth_shading=True,
-        proj_segments=None,
-        plot_projected=True,
-        proj_color="cyan",
-        proj_tube_radius=None,
+        filename = "start",
     ):
         surf = pv_surface_from_grid(vg.grid, origin=vg.info.origin)
 
         p = pv.Plotter()
-        p.add_mesh(surf, color=grid_color, opacity=grid_opacity, show_edges=False)
+        # p.add_mesh(surf, color=grid_color, opacity=grid_opacity, show_edges=False)
 
         if path_idx is None and path_xyz is None:
             p.show_axes(); p.show(); return
@@ -177,10 +174,19 @@ def run_admm_trajectory_optimization(config, DEBUG=False, PROJECTIONS=False):
                     else:
                         pass
 
-        p.show_axes()
-        p.show()
-    
+        p.open_movie("3Dplots/"+ filename +".mp4", framerate=30)
+        p.show(auto_close=False)
 
+        n_frames = 360
+        step = 360.0 / n_frames
+
+        for i in range(n_frames):
+            p.camera.azimuth += step
+            p.render()
+            p.write_frame()
+
+        p.close()
+    
 
     
     def straight_line_path_3d(start_xyz, goal_xyz, num_nodes, center_offsets=False):
@@ -310,6 +316,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False, PROJECTIONS=False):
             decomp_color="yellow",
             decomp_opacity=0.18,
             smooth_shading=True,
+            filename="debug_astar_path"
         )
         exit()
 
@@ -432,7 +439,10 @@ def run_admm_trajectory_optimization(config, DEBUG=False, PROJECTIONS=False):
         decomp_color="yellow",
         decomp_opacity=0.18,
         smooth_shading=True,
+        filename="initial_trajectory"
     )
+
+    exit()
 
     agg = {
         "sum_step1": 0.0,
@@ -614,6 +624,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False, PROJECTIONS=False):
             visualize_voxelgrid_with_path(
                 vg,
                 path_xyz=final_pts,
+                plotPath=True,
                 tube_radius=0.25,
                 grid_opacity=0.25,
                 grid_color="blue",
@@ -622,10 +633,11 @@ def run_admm_trajectory_optimization(config, DEBUG=False, PROJECTIONS=False):
                 mark_turns=False,
                 A_list=A_list,
                 b_list=b_list,
-                show_decomposition=True,
+                show_decomposition=False,
                 decomp_color="yellow",
                 decomp_opacity=0.18,
                 smooth_shading=True,
+                filename="only_trajectory"
             )
             break
 
