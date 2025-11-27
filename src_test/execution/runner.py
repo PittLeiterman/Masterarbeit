@@ -51,11 +51,15 @@ def run_admm_trajectory_optimization(config, DEBUG=False, PROJECTIONS=False):
         decomp_opacity=0.18,
         smooth_shading=True,
         filename = "start",
+        proj_xyz=None,
+        proj_as_line=True,
+        proj_color="yellow",
+        proj_radius_factor=2.0,
     ):
         surf = pv_surface_from_grid(vg.grid, origin=vg.info.origin)
 
         p = pv.Plotter()
-        # p.add_mesh(surf, color=grid_color, opacity=grid_opacity, show_edges=False)
+        p.add_mesh(surf, color=grid_color, opacity=grid_opacity, show_edges=False)
 
         if path_idx is None and path_xyz is None:
             p.show_axes(); p.show(); return
@@ -77,6 +81,22 @@ def run_admm_trajectory_optimization(config, DEBUG=False, PROJECTIONS=False):
             if mark_start_end:
                 p.add_mesh(pv.Sphere(radius=tube_radius*turn_scale, center=centers[0]),  color="green")
                 p.add_mesh(pv.Sphere(radius=tube_radius*turn_scale, center=centers[-1]), color="orange")
+
+            if proj_xyz is not None:
+                proj_xyz = np.asarray(proj_xyz, float)
+                if proj_xyz.ndim == 2 and proj_xyz.shape[1] == 3 and proj_xyz.shape[0] >= 2:
+                    if proj_as_line:
+                        proj_line = pv.Spline(proj_xyz, n_points=len(proj_xyz))
+                        p.add_mesh(
+                            proj_line.tube(radius=tube_radius*proj_radius_factor, n_sides=16),
+                            color=proj_color,
+                        )
+                    else:
+                        # visualize projections as spheres / points
+                        pts = pv.PolyData(proj_xyz)
+                        glyph_geom = pv.Sphere(radius=tube_radius*proj_radius_factor)
+                        glyphs = pts.glyph(scale=False, geom=glyph_geom)
+                        p.add_mesh(glyphs, color=proj_color)
     
 
             if mark_turns and turns_idx is not None:
@@ -423,26 +443,26 @@ def run_admm_trajectory_optimization(config, DEBUG=False, PROJECTIONS=False):
     z_traj_prev = z_traj.copy()
     rho_list = []
 
-    visualize_voxelgrid_with_path(
-        vg,
-        path_xyz=init_path,
-        plotPath=True,
-        tube_radius=0.25,
-        grid_opacity=0.25,
-        grid_color="blue",
-        turns_idx=None,
-        mark_start_end=True,
-        mark_turns=False,
-        A_list=A_list,
-        b_list=b_list,
-        show_decomposition=True,
-        decomp_color="yellow",
-        decomp_opacity=0.18,
-        smooth_shading=True,
-        filename="initial_trajectory"
-    )
+    # visualize_voxelgrid_with_path(
+    #     vg,
+    #     path_xyz=init_path,
+    #     plotPath=True,
+    #     tube_radius=0.25,
+    #     grid_opacity=0.25,
+    #     grid_color="blue",
+    #     turns_idx=None,
+    #     mark_start_end=True,
+    #     mark_turns=False,
+    #     A_list=A_list,
+    #     b_list=b_list,
+    #     show_decomposition=True,
+    #     decomp_color="yellow",
+    #     decomp_opacity=0.18,
+    #     smooth_shading=True,
+    #     filename="initial_trajectory"
+    # )
 
-    exit()
+    # exit()
 
     agg = {
         "sum_step1": 0.0,
@@ -637,7 +657,7 @@ def run_admm_trajectory_optimization(config, DEBUG=False, PROJECTIONS=False):
                 decomp_color="yellow",
                 decomp_opacity=0.18,
                 smooth_shading=True,
-                filename="only_trajectory"
+                filename="forestResult",
             )
             break
 
